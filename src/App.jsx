@@ -196,10 +196,10 @@ function App() {
   // Example: setEmotion('excited') on successful trade
   // Example: setEmotion('sad') on loss
 
-  // Theme-based background styles
+  // Theme-based background: warm sunrise (day) / deep midnight indigo (night)
   const backgroundStyle = theme === 'day'
-    ? 'bg-gradient-to-br from-slate-100 via-blue-50 to-purple-50'
-    : 'bg-[#0a0a0a]'
+    ? 'bg-gradient-to-br from-[#fdf6ec] to-[#fae8cc]'
+    : 'bg-gradient-to-br from-[#0d0f1a] to-[#1a1d2e]'
 
   // DEBUG: Log current state before render
   console.log('🎨 App render state:', {
@@ -242,7 +242,7 @@ function App() {
           </div>
         )}
         
-        {!isLoading && <ThemeToggle onThemeChange={handleThemeChange} />}
+        {!isLoading && <ThemeToggle onThemeChange={handleThemeChange} theme={theme} />}
         
         {isLoading ? (
           <LoadingScreen 
@@ -253,7 +253,7 @@ function App() {
           <Onboarding onComplete={handleOnboardingComplete} theme={theme} />
         ) : (
           <>
-            <WalletConnect />
+            <WalletConnect theme={theme} />
             
             <div className="flex flex-col items-center justify-center flex-1 w-full px-4 py-8 max-w-6xl mx-auto">
               {/* Yomo Character */}
