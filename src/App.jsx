@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import LoadingScreen from './components/LoadingScreen'
 import Onboarding from './components/Onboarding'
 import Yomo from './components/Yomo'
+import SpeechBubble from './components/SpeechBubble'
 import WalletConnect from './components/WalletConnect'
 import ThemeToggle from './components/ThemeToggle'
 import './styles/animations.css'
@@ -73,6 +74,18 @@ function App() {
     return variants[Math.floor(Math.random() * variants.length)]
   })
 
+  const [showWelcomeBack, setShowWelcomeBack] = useState(false)
+  const [showWelcomeBackOnMain, setShowWelcomeBackOnMain] = useState(false)
+  useEffect(() => {
+    if (isLoading || showOnboarding) return
+    const savedWallet = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address')
+    if (savedWallet && showWelcomeBackOnMain) {
+      setShowWelcomeBack(true)
+      const t = setTimeout(() => setShowWelcomeBack(false), 4000)
+      return () => clearTimeout(t)
+    }
+  }, [isLoading, showOnboarding, showWelcomeBackOnMain])
+
   // Reset shortcut (Shift + R)
   useEffect(() => {
     // Log reset shortcut info on load
@@ -122,9 +135,11 @@ function App() {
     if (!onboardingCompleted) {
       console.log('✅ Showing onboarding (not completed)')
       setShowOnboarding(true)
+      setShowWelcomeBackOnMain(false)
     } else {
       console.log('⏭️ Skipping onboarding (already completed)')
       setShowOnboarding(false)
+      setShowWelcomeBackOnMain(true)
     }
   }
 
@@ -252,13 +267,16 @@ function App() {
           <>
             
             <div className="flex flex-col items-center justify-center flex-1 w-full px-4 py-8 max-w-6xl mx-auto">
-              {/* Yomo Character */}
+              {/* Yomo Character + optional welcome back speech */}
               <div className="relative my-8 flex items-center justify-center">
                 <Yomo
-                  emotion={emotion}
+                  emotion={showWelcomeBack ? 'happy' : emotion}
                   variant={variant}
                   variantColor={variantColors[variant]}
                 />
+                {showWelcomeBack && (
+                  <SpeechBubble text="welcome back! 👋" isVisible={true} />
+                )}
               </div>
             </div>
           </>
