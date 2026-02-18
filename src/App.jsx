@@ -196,9 +196,9 @@ function App() {
   // Example: setEmotion('excited') on successful trade
   // Example: setEmotion('sad') on loss
 
-  // Theme-based background: warm sunrise (day) / deep midnight indigo (night)
+  // Theme-based background: warm sunset peach/coral (day) / deep midnight indigo (night)
   const backgroundStyle = theme === 'day'
-    ? 'bg-gradient-to-br from-[#fdf6ec] to-[#fae8cc]'
+    ? 'bg-gradient-to-br from-[#fde8d8] to-[#ffc4a3]'
     : 'bg-gradient-to-br from-[#0d0f1a] to-[#1a1d2e]'
 
   // DEBUG: Log current state before render
@@ -222,6 +222,14 @@ function App() {
 
   return (
     <div className={`min-h-screen ${backgroundStyle} text-accent flex flex-col items-center justify-center relative overflow-hidden transition-colors duration-300`}>
+      {/* Theme toggle and wallet button - fixed at top right, outside scaling wrapper */}
+      {!isLoading && (
+        <div className="fixed top-4 right-4 z-[60] flex items-center gap-3">
+          <ThemeToggle onThemeChange={handleThemeChange} theme={theme} />
+          {!showOnboarding && <WalletConnect theme={theme} />}
+        </div>
+      )}
+      
       {/* Responsive scaling wrapper */}
       <div 
         className="w-full h-full flex items-center justify-center"
@@ -232,17 +240,6 @@ function App() {
           margin: '0 auto'
         }}
       >
-        {/* DEBUG: Visual indicator (remove after debugging) */}
-        {process.env.NODE_ENV === 'development' && (
-          <div className="fixed bottom-4 right-4 z-50 bg-black/80 text-white text-xs font-mono p-2 rounded border border-white/20">
-            <div>Loading: {isLoading ? 'Yes' : 'No'}</div>
-            <div>Onboarding: {showOnboarding ? 'Yes' : 'No'}</div>
-            <div>Step: {showOnboarding ? '?' : 'N/A'}</div>
-            <div>Scale: {scale.toFixed(2)}</div>
-          </div>
-        )}
-        
-        {!isLoading && <ThemeToggle onThemeChange={handleThemeChange} theme={theme} />}
         
         {isLoading ? (
           <LoadingScreen 
@@ -253,7 +250,6 @@ function App() {
           <Onboarding onComplete={handleOnboardingComplete} theme={theme} />
         ) : (
           <>
-            <WalletConnect theme={theme} />
             
             <div className="flex flex-col items-center justify-center flex-1 w-full px-4 py-8 max-w-6xl mx-auto">
               {/* Yomo Character */}

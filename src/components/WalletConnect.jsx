@@ -47,7 +47,7 @@ const WalletConnect = ({ theme = 'night' }) => {
     : 'text-white/80 hover:text-white transition-colors text-lg leading-none'
 
   return (
-    <div className="fixed top-4 right-4 z-50">
+    <div>
       {!isConnected ? (
         <motion.button
           onClick={handleConnect}
