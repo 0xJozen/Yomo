@@ -53,138 +53,56 @@ function extractMintFromTransaction(tx) {
   return null
 }
 
-// ─── Symbol / market-cap extraction from v0/token-metadata ───────────────────
-
-function extractSymbol(item) {
-  return (
-    item?.onChainMetadata?.metadata?.data?.symbol ||
-    item?.legacyMetadata?.symbol ||
-    item?.onChainAccountInfo?.accountInfo?.data?.parsed?.info?.symbol ||
-    item?.tokenInfo?.symbol ||
-    item?.content?.metadata?.symbol ||
-    null
-  )
-}
-
-function extractMarketCap(item) {
-  const candidates = [
-    item?.legacyMetadata?.extensions?.market_cap,
-    item?.legacyMetadata?.extensions?.marketCap,
-    item?.legacyMetadata?.market_cap,
-    item?.legacyMetadata?.marketCap,
-    item?.onChainMetadata?.metadata?.data?.market_cap,
-    item?.tokenInfo?.market_cap,
-    item?.tokenInfo?.marketCap,
-  ]
-  for (const v of candidates) {
-    if (typeof v === 'number' && v > 0) return v
-    if (typeof v === 'string' && Number(v) > 0) return Number(v)
-  }
-  return null
-}
-
-// ─── DAS getAssetBatch (primary) ─────────────────────────────────────────────
-
-async function resolveViaDAS(mints, apiKey) {
-  const url = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`
-  const body = JSON.stringify({
-    jsonrpc: '2.0',
-    id: 'get-asset-batch',
-    method: 'getAssetBatch',
-    params: { ids: mints },
-  })
-  console.log('[DAS getAssetBatch] POST', url, '→ ids:', mints)
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    })
-    if (!res.ok) {
-      console.warn('[DAS getAssetBatch] non-OK:', res.status, await res.text())
-      return
-    }
-    const data = await res.json()
-    console.log('[DAS getAssetBatch] raw response:', data)
-    const results = Array.isArray(data?.result) ? data.result : []
-    for (const asset of results) {
-      const mint = asset?.id
-      if (!mint) continue
-      const symbol =
-        asset?.token_info?.symbol ||
-        asset?.content?.metadata?.symbol ||
-        null
-      const marketCap = null // DAS does not expose market cap
-      console.log(`[DAS] mint=${mint} symbol=${symbol}`)
-      tokenMetaCache.set(mint, { symbol: symbol ? symbol.trim() : null, marketCap })
-    }
-  } catch (err) {
-    console.warn('[DAS getAssetBatch] error:', err)
-  }
-}
-
-// ─── v0/token-metadata (fallback) ────────────────────────────────────────────
-
-async function resolveViaV0Meta(mints, apiKey) {
-  const url = `${HELIUS_BASE}/token-metadata?api-key=${apiKey}`
-  const body = JSON.stringify({ mintAccounts: mints })
-  console.log('[v0/token-metadata] POST mintAccounts:', mints)
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    })
-    if (!res.ok) {
-      console.warn('[v0/token-metadata] non-OK:', res.status, await res.text())
-      return
-    }
-    const data = await res.json()
-    console.log('[v0/token-metadata] raw response:', data)
-    const list = Array.isArray(data) ? data : []
-    for (const item of list) {
-      const mint = item.account
-      if (!mint) continue
-      const symbol = extractSymbol(item)
-      const marketCap = extractMarketCap(item)
-      console.log(`[v0/token-metadata] mint=${mint} symbol=${symbol} marketCap=${marketCap}`)
-      if (!tokenMetaCache.has(mint)) {
-        tokenMetaCache.set(mint, { symbol: symbol ? symbol.trim() : null, marketCap })
-      }
-    }
-  } catch (err) {
-    console.warn('[v0/token-metadata] error:', err)
-  }
-}
-
-// ─── Orchestrator ─────────────────────────────────────────────────────────────
+// ─── DexScreener token resolution ────────────────────────────────────────────
+// Endpoint: GET https://api.dexscreener.com/latest/dex/tokens/{mintAddress}
+// Response: { pairs: [ { baseToken: { address, symbol, name }, priceUsd, ... }, ... ] }
+// No API key required. Covers virtually all Solana tokens including new memecoins.
+// We resolve mints one at a time to keep the implementation simple and reliable.
 
 /**
- * Resolve symbol + market cap for a list of mint addresses.
- * Uses DAS getAssetBatch as primary, falls back to v0/token-metadata for any still uncached.
+ * Resolve token symbol and USD price for a list of mint addresses via DexScreener.
+ * Results stored in tokenMetaCache as { symbol, marketCap (= USD price) }.
  */
-async function resolveTokenMeta(mintAddresses, apiKey) {
+async function resolveTokenMeta(mintAddresses) {
   const uncached = [...new Set(mintAddresses)].filter(
     (m) => m && !tokenMetaCache.has(m)
   )
   if (!uncached.length) return
 
-  console.log('[Token meta] Resolving', uncached.length, 'mint(s):', uncached)
+  console.log('[Token resolve] Unique mints being passed:', uncached)
 
-  // Primary: DAS
-  await resolveViaDAS(uncached, apiKey)
+  await Promise.all(uncached.map(async (mint) => {
+    const url = `https://api.dexscreener.com/latest/dex/tokens/${mint}`
+    console.log('[DexScreener] GET', url)
+    try {
+      const res = await fetch(url)
+      if (!res.ok) {
+        console.warn(`[DexScreener] non-OK for mint=${mint}:`, res.status)
+        tokenMetaCache.set(mint, { symbol: null, marketCap: null })
+        return
+      }
+      const json = await res.json()
+      console.log(`[DexScreener] raw response for mint=${mint}:`, json)
 
-  // Fallback: v0/token-metadata for any still missing
-  const stillMissing = uncached.filter((m) => !tokenMetaCache.has(m))
-  if (stillMissing.length) {
-    console.log('[Token meta] DAS missed', stillMissing.length, 'mint(s), trying v0/token-metadata:', stillMissing)
-    await resolveViaV0Meta(stillMissing, apiKey)
-  }
+      const pairs = Array.isArray(json?.pairs) ? json.pairs : []
+      if (!pairs.length) {
+        console.log(`[DexScreener] No pairs found for mint=${mint}`)
+        tokenMetaCache.set(mint, { symbol: null, marketCap: null })
+        return
+      }
 
-  // Sentinel entries for anything we still could not resolve (avoid repeated calls)
-  for (const mint of uncached) {
-    if (!tokenMetaCache.has(mint)) tokenMetaCache.set(mint, { symbol: null, marketCap: null })
-  }
+      // Use the first pair — typically the most liquid
+      const pair = pairs[0]
+      const symbol = pair.baseToken?.symbol?.trim() || null
+      const priceRaw = pair.priceUsd
+      const price = priceRaw != null ? parseFloat(priceRaw) : null
+      console.log(`[DexScreener] mint=${mint} symbol=${symbol} priceUsd=${price} (pair: ${pair.dexId} ${pair.pairAddress})`)
+      tokenMetaCache.set(mint, { symbol, marketCap: isNaN(price) ? null : price })
+    } catch (err) {
+      console.warn(`[DexScreener] fetch error for mint=${mint}:`, err)
+      tokenMetaCache.set(mint, { symbol: null, marketCap: null })
+    }
+  }))
 }
 
 /**
@@ -306,9 +224,9 @@ export const getWalletActivity = async (address) => {
       })
     }
 
-    // Resolve symbol + market cap for any new mints
+    // Resolve symbol + price for any new mints via Jupiter
     const mints = transactionList.map((t) => t._mint).filter(Boolean)
-    if (mints.length) await resolveTokenMeta(mints, apiKey)
+    if (mints.length) await resolveTokenMeta(mints)
 
     // Apply resolved metadata and clean up internal _mint field
     for (const entry of transactionList) {

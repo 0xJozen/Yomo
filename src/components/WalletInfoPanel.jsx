@@ -23,12 +23,15 @@ function formatSolChange(solChange) {
   return solChange > 0 ? `+${fixed}` : `-${fixed}`
 }
 
-function formatMarketCap(value) {
+/** Format a USD price (from Jupiter). Shows enough precision to be useful for micro-cap tokens. */
+function formatPrice(value) {
   if (value == null || value <= 0) return '—'
-  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`
   if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`
-  if (value >= 1e3) return `$${Math.round(value / 1e3)}k`
-  return `$${Math.round(value)}`
+  if (value >= 1e3) return `$${(value / 1e3).toFixed(1)}k`
+  if (value >= 1) return `$${value.toFixed(2)}`
+  if (value >= 0.01) return `$${value.toFixed(4)}`
+  if (value >= 0.0001) return `$${value.toFixed(6)}`
+  return `<$0.0001`
 }
 
 const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressChange }) => {
@@ -86,7 +89,7 @@ const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressCha
   }
 
   return (
-    <div className={`rounded-xl p-4 w-[360px] overflow-hidden ${panelClass}`}>
+    <div className={`rounded-xl p-4 pr-3 w-[380px] overflow-hidden ${panelClass}`}>
       <div className="mb-3">
         <div className={labelClass}>Wallet</div>
         {isEditing ? (
@@ -118,7 +121,7 @@ const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressCha
       </div>
 
       <div className={labelClass}>Recent transactions</div>
-      <div className="mt-2 max-h-[240px] overflow-y-auto overflow-x-hidden">
+      <div className="mt-2 max-h-[240px] overflow-y-auto overflow-x-hidden pr-1">
         {transactions.length === 0 ? (
           <p className={`py-2 font-mono text-xs ${isDay ? 'text-gray-500' : 'text-white/50'}`}>
             No recent transactions
@@ -126,16 +129,16 @@ const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressCha
         ) : (
           <table className="w-full table-fixed font-mono text-xs border-collapse">
             <colgroup>
-              <col style={{ width: '52px' }} />
-              <col style={{ width: '94px' }} />
-              <col style={{ width: '68px' }} />
               <col style={{ width: '60px' }} />
+              <col style={{ width: '104px' }} />
+              <col style={{ width: '72px' }} />
+              <col style={{ width: '68px' }} />
             </colgroup>
             <thead>
               <tr className={`${isDay ? 'text-gray-500' : 'text-white/50'} text-left sticky top-0 ${isDay ? 'bg-white/90' : 'bg-black/20'}`}>
                 <th className="py-1.5 pr-1.5 font-medium">Token</th>
                 <th className="py-1.5 pr-1.5 font-medium text-right">Amount</th>
-                <th className="py-1.5 pr-1.5 font-medium text-right">Mkt Cap</th>
+                <th className="py-1.5 pr-1.5 font-medium text-right">Price</th>
                 <th className="py-1.5 font-medium text-right">Time</th>
               </tr>
             </thead>
@@ -150,7 +153,7 @@ const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressCha
                     {formatSolChange(tx.solChange)}
                   </td>
                   <td className={`py-2 pr-1.5 text-right whitespace-nowrap ${isDay ? 'text-gray-600' : 'text-white/70'}`}>
-                    {formatMarketCap(tx.marketCap)}
+                    {formatPrice(tx.marketCap)}
                   </td>
                   <td className={`py-2 text-right whitespace-nowrap ${isDay ? 'text-gray-500' : 'text-white/50'}`}>
                     {formatTimeAgo(tx.timestamp)}

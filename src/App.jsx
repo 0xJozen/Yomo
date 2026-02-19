@@ -298,25 +298,27 @@ function App() {
   const handleLoadingComplete = useCallback(() => {
     console.log('⏱️ Loading screen completed')
     setIsLoading(false)
-    
-    // Only treat as completed if the value is exactly the string 'true' (avoid stale/broad matches)
+
+    // Only skip onboarding when the user actually connected via Phantom.
+    // A pasted/viewed address does NOT count — those users always see the landing
+    // screen first so they can go through BEGIN and choose a variant.
     const hasCompletedOnboarding = localStorage.getItem('hasCompletedOnboarding') === 'true'
-    const oldOnboardingCompleted = localStorage.getItem('yomo_onboarding_completed') === 'true'
-    const onboardingCompleted = hasCompletedOnboarding || oldOnboardingCompleted
-    
+    const connectedViaPhantom = localStorage.getItem('connectedViaPhantom') === 'true'
+    const onboardingCompleted = hasCompletedOnboarding && connectedViaPhantom
+
     console.log('🔍 DEBUG - Checking onboarding status after loading:', {
       hasCompletedOnboarding,
-      oldOnboardingCompleted,
+      connectedViaPhantom,
       onboardingCompleted,
       willShowOnboarding: !onboardingCompleted
     })
-    
+
     if (!onboardingCompleted) {
-      console.log('✅ Showing onboarding (not completed)')
+      console.log('✅ Showing onboarding (not completed or not Phantom-connected)')
       setShowOnboarding(true)
       setShowWelcomeBackOnMain(false)
     } else {
-      console.log('⏭️ Skipping onboarding (already completed)')
+      console.log('⏭️ Skipping onboarding (Phantom-connected, already completed)')
       setShowOnboarding(false)
       setShowWelcomeBackOnMain(true)
     }
@@ -448,7 +450,7 @@ function App() {
             {/* Wallet info panel — absolutely positioned left side, does not affect Yomo centering */}
             <div
               className="absolute z-20"
-              style={{ left: '1.5rem', top: '50%', transform: 'translateY(-50%)' }}
+              style={{ left: '5rem', top: '50%', transform: 'translateY(-50%)' }}
             >
               <WalletInfoPanel
                 theme={theme}
