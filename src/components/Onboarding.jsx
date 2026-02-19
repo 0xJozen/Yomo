@@ -40,6 +40,7 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
   const [showDocs, setShowDocs] = useState(false)
   const [walletAddress, setWalletAddress] = useState('')
   const [walletError, setWalletError] = useState('')
+  const [connectedViaPhantom, setConnectedViaPhantom] = useState(false)
   const [variant] = useState(() => {
     const variants = ['dawn', 'sage', 'twilight']
     return variants[Math.floor(Math.random() * variants.length)]
@@ -64,12 +65,14 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
         const response = await window.solana.connect()
         const address = response.publicKey.toString()
         setWalletAddress(address)
+        setConnectedViaPhantom(true)
       } catch (err) {
         console.error('Error connecting wallet:', err)
         setWalletError('Failed to connect wallet. Please try again.')
       }
     } else {
       setWalletAddress('DemoWallet1234567890')
+      setConnectedViaPhantom(false)
     }
   }
 
@@ -85,10 +88,10 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
       return
     }
     setWalletError('')
-    completeOnboarding(trimmed)
+    completeOnboarding(trimmed, false)
   }
 
-  const completeOnboarding = (address) => {
+  const completeOnboarding = (address, connectedViaPhantomFlag) => {
     localStorage.setItem('hasCompletedOnboarding', 'true')
     localStorage.setItem('selectedVariant', variant)
     localStorage.setItem('walletAddress', address)
@@ -96,6 +99,7 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
     localStorage.setItem('yomo_variant', variant)
     localStorage.setItem('yomo_wallet_address', address)
     localStorage.setItem('yomo_emotion', 'neutral')
+    localStorage.setItem('connectedViaPhantom', connectedViaPhantomFlag ? 'true' : 'false')
     onComplete(variant, address, 'neutral')
   }
 
@@ -114,7 +118,7 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
       }
     }
     setWalletError('')
-    completeOnboarding(trimmed)
+    completeOnboarding(trimmed, connectedViaPhantom)
   }
 
   const backgroundClass = theme === 'day'
@@ -248,6 +252,7 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
                   onChange={(e) => {
                     setWalletAddress(e.target.value)
                     setWalletError('')
+                    setConnectedViaPhantom(false)
                   }}
                   onKeyDown={(e) => e.key === 'Enter' && handlePasteSubmit()}
                   placeholder="Paste Solana wallet address..."

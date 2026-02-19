@@ -1,25 +1,29 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 
 const LoadingScreen = ({ onComplete, variantColor }) => {
   const [isComplete, setIsComplete] = useState(false)
+  const onCompleteRef = useRef(onComplete)
+  onCompleteRef.current = onComplete
 
   useEffect(() => {
     console.log('⏱️ LoadingScreen: Starting 2s timer')
+    let completeTimer
     const timer = setTimeout(() => {
       console.log('✅ LoadingScreen: Timer complete, setting isComplete')
       setIsComplete(true)
-      setTimeout(() => {
+      completeTimer = setTimeout(() => {
         console.log('📞 LoadingScreen: Calling onComplete callback')
-        onComplete()
+        onCompleteRef.current()
       }, 500)
     }, 2000)
 
     return () => {
       console.log('🧹 LoadingScreen: Cleanup timer')
       clearTimeout(timer)
+      if (completeTimer) clearTimeout(completeTimer)
     }
-  }, [onComplete])
+  }, [])
 
   return (
     <motion.div

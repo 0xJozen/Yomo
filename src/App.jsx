@@ -1,11 +1,42 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import LoadingScreen from './components/LoadingScreen'
 import Onboarding from './components/Onboarding'
 import Yomo from './components/Yomo'
 import SpeechBubble from './components/SpeechBubble'
 import WalletConnect from './components/WalletConnect'
 import ThemeToggle from './components/ThemeToggle'
+import WalletInfoPanel from './components/WalletInfoPanel'
+import { getWalletActivity } from './utils/walletService'
 import './styles/animations.css'
+
+const YOMO_VERSION = '1.0'
+
+/** Run once at module load: if storage version is wrong, clear all yomo-related keys so old test data never sticks. */
+function ensureYomoStorageVersion() {
+  if (typeof window === 'undefined') return
+  if (localStorage.getItem('yomo_version') === YOMO_VERSION) return
+  const knownKeys = [
+    'hasCompletedOnboarding',
+    'yomo_onboarding_completed',
+    'selectedVariant',
+    'yomo_variant',
+    'walletAddress',
+    'yomo_wallet_address',
+    'isPublic',
+    'yomo_emotion',
+    'connectedViaPhantom',
+    'yomo_theme',
+  ]
+  const keysToRemove = [...knownKeys]
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key && key.includes('yomo') && !keysToRemove.includes(key)) keysToRemove.push(key)
+  }
+  keysToRemove.forEach((k) => localStorage.removeItem(k))
+  localStorage.setItem('yomo_version', YOMO_VERSION)
+}
+
+ensureYomoStorageVersion()
 
 console.log('🚀 App.jsx loaded')
 
@@ -13,6 +44,13 @@ const variantColors = {
   dawn: '#F5E6D3',
   sage: '#8FD4B8',
   twilight: '#5a6a8f'
+}
+
+const EMOTION_REACTIONS = {
+  happy: 'your portfolio is looking good! 📈',
+  sad: 'rough patch lately... 📉',
+  sleepy: "you've been quiet lately 😴",
+  neutral: 'watching the markets... 👀'
 }
 
 function App() {
@@ -42,14 +80,12 @@ function App() {
     // Expose helper function to window for easy debugging
     window.clearOnboarding = () => {
       console.log('🧹 Clearing onboarding localStorage...')
-      localStorage.removeItem('hasCompletedOnboarding')
-      localStorage.removeItem('yomo_onboarding_completed')
-      localStorage.removeItem('selectedVariant')
-      localStorage.removeItem('yomo_variant')
-      localStorage.removeItem('walletAddress')
-      localStorage.removeItem('yomo_wallet_address')
-      localStorage.removeItem('isPublic')
-      localStorage.removeItem('yomo_emotion')
+      const knownKeys = [
+        'hasCompletedOnboarding', 'yomo_onboarding_completed', 'selectedVariant', 'yomo_variant',
+        'walletAddress', 'yomo_wallet_address', 'isPublic', 'yomo_emotion', 'connectedViaPhantom'
+      ]
+      knownKeys.forEach((k) => localStorage.removeItem(k))
+      // Keep yomo_version so next load doesn't re-clear
       console.log('✅ Cleared! Reload page to see onboarding.')
     }
     
@@ -76,15 +112,167 @@ function App() {
 
   const [showWelcomeBack, setShowWelcomeBack] = useState(false)
   const [showWelcomeBackOnMain, setShowWelcomeBackOnMain] = useState(false)
+  const [displayedWallet, setDisplayedWallet] = useState('')
+  const [walletTransactions, setWalletTransactions] = useState([])
+  const hasShownWelcomeBack = useRef(false)
+  // Only run when we transition to main app (both false). Don't depend on showWelcomeBackOnMain to avoid extra runs.
   useEffect(() => {
     if (isLoading || showOnboarding) return
+    if (hasShownWelcomeBack.current) return
     const savedWallet = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address')
-    if (savedWallet && showWelcomeBackOnMain) {
-      setShowWelcomeBack(true)
-      const t = setTimeout(() => setShowWelcomeBack(false), 4000)
-      return () => clearTimeout(t)
+    const connectedViaPhantom = localStorage.getItem('connectedViaPhantom') === 'true'
+    if (!savedWallet || !connectedViaPhantom) return
+    hasShownWelcomeBack.current = true
+    setShowWelcomeBack(true)
+    const t = setTimeout(() => setShowWelcomeBack(false), 4000)
+    return () => clearTimeout(t)
+  }, [isLoading, showOnboarding])
+
+  // Sync displayed wallet from localStorage when main app is shown
+  useEffect(() => {
+    if (isLoading || showOnboarding) return
+    if (displayedWallet) return
+    const saved = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address')
+    if (saved) setDisplayedWallet(saved)
+  }, [isLoading, showOnboarding, displayedWallet])
+
+  // Emotion reaction bubble (initial load or trade PnL)
+  const [heliusReactionBubble, setHeliusReactionBubble] = useState(null) // { text } or null
+  const heliusReactionTimeoutRef = useRef(null)
+
+  // Session-based emotion: swap-in starts session, swap-out realizes PnL, 4h inactivity resets
+  const POLL_INTERVAL_MS = 10000
+  const SESSION_INACTIVITY_SEC = 4 * 3600
+  const processedTxKeysRef = useRef(new Set())
+  const sessionStartTsRef = useRef(0)
+  const lastActivityTsRef = useRef(0)
+  const sessionCumulativePnlRef = useRef(0)
+  const lastEntrySolRef = useRef(0)
+
+  const resetSession = useCallback(() => {
+    sessionStartTsRef.current = 0
+    lastActivityTsRef.current = 0
+    sessionCumulativePnlRef.current = 0
+    lastEntrySolRef.current = 0
+  }, [])
+
+  const applySessionEmotion = useCallback(() => {
+    const pnl = sessionCumulativePnlRef.current
+    if (pnl > 0) setEmotion('happy')
+    else if (pnl < 0) setEmotion('sad')
+    else setEmotion('neutral')
+    localStorage.setItem('yomo_emotion', pnl > 0 ? 'happy' : pnl < 0 ? 'sad' : 'neutral')
+  }, [])
+
+  const processWalletResult = useCallback((result, isInitial = false) => {
+    setWalletTransactions(result.transactions || [])
+    const txs = result.transactions || []
+    const now = Math.floor(Date.now() / 1000)
+
+    if (isInitial) {
+      processedTxKeysRef.current = new Set(
+        txs.map((tx, i) => tx.signature || `${tx.timestamp}-${tx.solChange}-${i}`)
+      )
+      const emotion = result.emotion || 'neutral'
+      setEmotion(emotion)
+      localStorage.setItem('yomo_emotion', emotion)
+      setHeliusReactionBubble({ text: EMOTION_REACTIONS[emotion] ?? EMOTION_REACTIONS.neutral })
+      if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
+      heliusReactionTimeoutRef.current = setTimeout(() => setHeliusReactionBubble(null), 4000)
+      return
     }
-  }, [isLoading, showOnboarding, showWelcomeBackOnMain])
+
+    // Poll: only process new txs
+    let showedBubble = false
+    for (let i = 0; i < txs.length; i++) {
+      const tx = txs[i]
+      const key = tx.signature || `${tx.timestamp}-${tx.solChange}-${i}`
+      if (processedTxKeysRef.current.has(key)) continue
+      processedTxKeysRef.current.add(key)
+
+      lastActivityTsRef.current = tx.timestamp || now
+
+      const solChange = tx.solChange ?? 0
+      if (solChange > 0) {
+        if (sessionStartTsRef.current === 0) {
+          sessionStartTsRef.current = now
+          lastActivityTsRef.current = tx.timestamp || now
+        }
+        lastEntrySolRef.current += solChange
+      } else if (solChange < 0) {
+        const realizedPnl = lastEntrySolRef.current + solChange
+        lastEntrySolRef.current = Math.max(0, lastEntrySolRef.current + solChange)
+        sessionCumulativePnlRef.current += realizedPnl
+
+        const gain = Math.abs(realizedPnl)
+        const gainStr = gain >= 0.0001 ? gain.toFixed(4) : gain.toExponential(2)
+        if (realizedPnl > 0) {
+          setEmotion('happy')
+          setHeliusReactionBubble({ text: `+${gainStr} SOL! 📈` })
+        } else {
+          setEmotion('sad')
+          setHeliusReactionBubble({ text: `-${gainStr} SOL 📉` })
+        }
+        showedBubble = true
+        if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
+        heliusReactionTimeoutRef.current = setTimeout(() => {
+          setHeliusReactionBubble(null)
+          applySessionEmotion()
+        }, 4000)
+      }
+    }
+    // Only apply session emotion if a trading session has actually started.
+    // Before the first swap-in, sessionStartTsRef is 0 — don't overwrite the
+    // initial emotion that was set from the Helius activity result.
+    if (!showedBubble && sessionStartTsRef.current !== 0) applySessionEmotion()
+  }, [applySessionEmotion, resetSession])
+
+  // Initial fetch when displayedWallet is set
+  useEffect(() => {
+    if (isLoading || showOnboarding || !displayedWallet) return
+    let cancelled = false
+    getWalletActivity(displayedWallet).then((result) => {
+      if (cancelled) return
+      console.log('Helius getWalletActivity result:', {
+        transactionCount: result.transactionCount,
+        recentActivity: result.recentActivity,
+        solChange: result.solChange,
+        emotion: result.emotion
+      })
+      processWalletResult(result, true)
+    })
+    return () => {
+      cancelled = true
+      if (heliusReactionTimeoutRef.current) {
+        clearTimeout(heliusReactionTimeoutRef.current)
+        heliusReactionTimeoutRef.current = null
+      }
+    }
+  }, [isLoading, showOnboarding, displayedWallet, processWalletResult])
+
+  // 10s polling: refetch and process new txs for session-based emotion
+  useEffect(() => {
+    if (isLoading || showOnboarding || !displayedWallet) return
+    const interval = setInterval(() => {
+      getWalletActivity(displayedWallet).then((result) => {
+        setWalletTransactions(result.transactions || [])
+        const now = Math.floor(Date.now() / 1000)
+        if (sessionStartTsRef.current !== 0 && now - lastActivityTsRef.current > SESSION_INACTIVITY_SEC) {
+          resetSession()
+        }
+        processWalletResult(result, false)
+      })
+    }, POLL_INTERVAL_MS)
+    return () => clearInterval(interval)
+  }, [isLoading, showOnboarding, displayedWallet, processWalletResult, resetSession])
+
+  const handleWalletAddressChange = useCallback((newAddress) => {
+    localStorage.setItem('walletAddress', newAddress)
+    localStorage.setItem('yomo_wallet_address', newAddress)
+    processedTxKeysRef.current = new Set()
+    resetSession()
+    setDisplayedWallet(newAddress)
+  }, [resetSession])
 
   // Reset shortcut (Shift + R)
   useEffect(() => {
@@ -93,17 +281,12 @@ function App() {
 
     const handleKeyDown = (e) => {
       if (e.shiftKey && e.key === 'R') {
-        console.log('🔄 Reset triggered - clearing localStorage and restarting onboarding')
-        // Clear all onboarding-related localStorage
-        localStorage.removeItem('hasCompletedOnboarding')
-        localStorage.removeItem('yomo_onboarding_completed')
-        localStorage.removeItem('selectedVariant')
-        localStorage.removeItem('yomo_variant')
-        localStorage.removeItem('walletAddress')
-        localStorage.removeItem('yomo_wallet_address')
-        localStorage.removeItem('isPublic')
-        localStorage.removeItem('yomo_emotion')
-        // Reload page to restart onboarding
+        console.log('🔄 Reset triggered - clearing onboarding and reloading')
+        const knownKeys = [
+          'hasCompletedOnboarding', 'yomo_onboarding_completed', 'selectedVariant', 'yomo_variant',
+          'walletAddress', 'yomo_wallet_address', 'isPublic', 'yomo_emotion', 'connectedViaPhantom'
+        ]
+        knownKeys.forEach((k) => localStorage.removeItem(k))
         window.location.reload()
       }
     }
@@ -112,13 +295,13 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  const handleLoadingComplete = () => {
+  const handleLoadingComplete = useCallback(() => {
     console.log('⏱️ Loading screen completed')
     setIsLoading(false)
     
-    // Check if user has completed onboarding (new structure)
-    const hasCompletedOnboarding = localStorage.getItem('hasCompletedOnboarding')
-    const oldOnboardingCompleted = localStorage.getItem('yomo_onboarding_completed')
+    // Only treat as completed if the value is exactly the string 'true' (avoid stale/broad matches)
+    const hasCompletedOnboarding = localStorage.getItem('hasCompletedOnboarding') === 'true'
+    const oldOnboardingCompleted = localStorage.getItem('yomo_onboarding_completed') === 'true'
     const onboardingCompleted = hasCompletedOnboarding || oldOnboardingCompleted
     
     console.log('🔍 DEBUG - Checking onboarding status after loading:', {
@@ -127,10 +310,6 @@ function App() {
       onboardingCompleted,
       willShowOnboarding: !onboardingCompleted
     })
-    
-    // TEMP: Force show onboarding for debugging - comment this out after testing
-    // setShowOnboarding(true)
-    // console.log('🔧 DEBUG MODE: Forcing onboarding to show')
     
     if (!onboardingCompleted) {
       console.log('✅ Showing onboarding (not completed)')
@@ -141,9 +320,9 @@ function App() {
       setShowOnboarding(false)
       setShowWelcomeBackOnMain(true)
     }
-  }
+  }, [])
 
-  const handleOnboardingComplete = (selectedVariant, walletAddress, initialEmotion = 'neutral') => {
+  const handleOnboardingComplete = useCallback((selectedVariant, walletAddress, initialEmotion = 'neutral') => {
     console.log('✅ Onboarding complete callback called:', { selectedVariant, walletAddress, initialEmotion })
     
     // Save using new localStorage structure
@@ -168,12 +347,13 @@ function App() {
     setVariant(selectedVariant)
     setEmotion(initialEmotion)
     setShowOnboarding(false)
+    if (walletAddress) setDisplayedWallet(walletAddress)
     console.log('🏁 Onboarding hidden, showing main app')
-  }
+  }, [])
 
-  const handleThemeChange = (newTheme) => {
+  const handleThemeChange = useCallback((newTheme) => {
     setTheme(newTheme)
-  }
+  }, [])
 
   // Calculate responsive scale based on viewport width
   // Target: good from 700px to 1920px width
@@ -265,10 +445,22 @@ function App() {
           <Onboarding onComplete={handleOnboardingComplete} theme={theme} />
         ) : (
           <>
-            
-            <div className="flex flex-col items-center justify-center flex-1 w-full px-4 py-8 max-w-6xl mx-auto">
-              {/* Yomo Character + optional welcome back speech */}
-              <div className="relative my-8 flex items-center justify-center">
+            {/* Wallet info panel — absolutely positioned left side, does not affect Yomo centering */}
+            <div
+              className="absolute z-20"
+              style={{ left: '1.5rem', top: '50%', transform: 'translateY(-50%)' }}
+            >
+              <WalletInfoPanel
+                theme={theme}
+                walletAddress={displayedWallet}
+                transactions={walletTransactions}
+                onAddressChange={handleWalletAddressChange}
+              />
+            </div>
+
+            {/* Yomo — full-width full-height centered */}
+            <div className="flex flex-col items-center justify-center w-full h-full">
+              <div className="relative flex items-center justify-center">
                 <Yomo
                   emotion={showWelcomeBack ? 'happy' : emotion}
                   variant={variant}
@@ -276,6 +468,9 @@ function App() {
                 />
                 {showWelcomeBack && (
                   <SpeechBubble text="welcome back! 👋" isVisible={true} />
+                )}
+                {heliusReactionBubble && (
+                  <SpeechBubble text={heliusReactionBubble.text} isVisible={true} />
                 )}
               </div>
             </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 
 // Import all emotion images dynamically using Vite's glob import
@@ -20,32 +20,40 @@ const Yomo = ({ emotion, variant, variantColor }) => {
   const [currentImageSrc, setCurrentImageSrc] = useState(null)
   const [nextImageSrc, setNextImageSrc] = useState(null)
   const [isTransitioning, setIsTransitioning] = useState(false)
+  const currentImageSrcRef = useRef(null)
+  currentImageSrcRef.current = currentImageSrc
 
-  // Generate image path based on variant and emotion
+  // Asset folder uses "mint" for the sage variant; app uses "sage"
+  const variantToAssetPrefix = { sage: 'mint', dawn: 'dawn', twilight: 'twilight' }
   const getImagePath = (variantName, emotionName) => {
-    // Try .jpg first since most images are .jpg, then .png as fallback
-    const possibleKeys = [
-      `/src/assets/images/${variantName}-${emotionName}.jpg`,
-      `/src/assets/images/${variantName}-${emotionName}.png`,
-      `/src/assets/images/${variantName}-${emotionName}.jpeg`,
-    ]
-    
+    const assetPrefix = variantToAssetPrefix[variantName] ?? variantName
+    const base = `${assetPrefix}-${emotionName}`
+    const extensions = ['.jpg', '.png', '.jpeg']
+    // Vite glob keys can be with or without leading slash (e.g. /src/... or src/...)
+    const pathPrefixes = ['/src/assets/images/', 'src/assets/images/']
+    const possibleKeys = []
+    for (const prefix of pathPrefixes) {
+      for (const ext of extensions) {
+        possibleKeys.push(`${prefix}${base}${ext}`)
+      }
+    }
     for (const key of possibleKeys) {
       if (emotionImageModules[key]) {
         return emotionImageModules[key]
       }
     }
-    
-    // Log all available keys for debugging if image not found
+    // Fallback: try matching any key that ends with our base+ext (handles OS path differences)
+    const matchKey = Object.keys(emotionImageModules).find(
+      (k) => k.includes(base) && (k.endsWith('.jpg') || k.endsWith('.png') || k.endsWith('.jpeg'))
+    )
+    if (matchKey) return emotionImageModules[matchKey]
+
     const availableKeys = Object.keys(emotionImageModules)
     if (availableKeys.length > 0) {
-      console.log('Available emotion images:', availableKeys)
-      console.log(`Looking for: ${variantName}-${emotionName}`)
+      console.warn(`Image not found: ${variantName}-${emotionName} (asset prefix: ${assetPrefix}), tried:`, possibleKeys.slice(0, 3), 'Available:', availableKeys.map((k) => k.split('/').pop()))
     } else {
-      console.warn('No emotion images found in /src/assets/images/. Please ensure images are placed there with naming format: {variant}-{emotion}.jpg or .png')
+      console.warn('No emotion images found in /src/assets/images/. Use naming format: {variant}-{emotion}.jpg or .png')
     }
-    
-    console.warn(`Image not found: ${variantName}-${emotionName} (tried: ${possibleKeys.join(', ')})`)
     return null
   }
 
@@ -79,45 +87,49 @@ const Yomo = ({ emotion, variant, variantColor }) => {
     }
   }, [particles])
 
-  // Handle image transitions
+  // Handle image transitions: only run when variant or emotion change to avoid re-run loops from setState
   useEffect(() => {
+    const loadedKeys = Object.keys(emotionImageModules)
+    console.log(
+      `[Yomo] emotion="${emotion}" variant="${variant}" — ${loadedKeys.length} image(s) loaded:`,
+      loadedKeys.map((k) => k.split('/').pop())
+    )
+
     const newImageSrc = getImagePath(variant, emotion)
-    
+    console.log(
+      `[Yomo] getImagePath("${variant}", "${emotion}") →`,
+      newImageSrc ? `found (${typeof newImageSrc === 'string' ? newImageSrc.slice(0, 60) : '[module]'})` : 'NOT FOUND'
+    )
+
+    const current = currentImageSrcRef.current
+
     if (!newImageSrc) {
-      const possibleKeys = [
-        `/src/assets/images/${variant}-${emotion}.jpg`,
-        `/src/assets/images/${variant}-${emotion}.png`,
-        `/src/assets/images/${variant}-${emotion}.jpeg`,
-      ]
-      console.warn(`Image not found: ${variant}-${emotion}`)
-      console.warn('Tried paths:', possibleKeys)
-      const availableImages = Object.keys(emotionImageModules)
-      if (availableImages.length > 0) {
-        console.warn('Available images:', availableImages)
-      } else {
-        console.error('No images loaded! Check that images exist in /src/assets/images/')
-      }
+      const assetPrefix = { sage: 'mint', dawn: 'dawn', twilight: 'twilight' }[variant] ?? variant
+      console.warn(
+        `[Yomo] Image not found for variant="${variant}" (asset prefix="${assetPrefix}") emotion="${emotion}".`,
+        `\nTried: ${assetPrefix}-${emotion}.{jpg,png,jpeg} in /src/assets/images/`,
+        `\nLoaded images:`, loadedKeys.map((k) => k.split('/').pop())
+      )
       return
     }
-    
-    if (!currentImageSrc) {
-      // Initial load
+
+    if (!current) {
+      console.log(`[Yomo] Initial image set: ${variant}-${emotion}`)
       setCurrentImageSrc(newImageSrc)
-    } else if (currentImageSrc !== newImageSrc) {
-      // Transition to new image
+    } else if (current !== newImageSrc) {
+      console.log(`[Yomo] Transitioning image: ${variant}-${emotion}`)
       setIsTransitioning(true)
       setNextImageSrc(newImageSrc)
-      
-      // After transition completes (0.4s), switch images
       const switchTimer = setTimeout(() => {
         setCurrentImageSrc(newImageSrc)
         setNextImageSrc(null)
         setIsTransitioning(false)
-      }, 400) // Full transition duration
-
+      }, 400)
       return () => clearTimeout(switchTimer)
+    } else {
+      console.log(`[Yomo] Image already showing: ${variant}-${emotion}`)
     }
-  }, [variant, emotion, currentImageSrc])
+  }, [variant, emotion])
 
   return (
     <div className="relative flex items-center justify-center">
