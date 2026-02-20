@@ -39,16 +39,20 @@ export async function generateYomoSpeech(context) {
     recentTrades = [],
     walletAddress = '',
     yomoName = '',
+    userMessage = '',
   } = context
 
-  // Build a compact cache key from the parts that actually change responses
+  // User-initiated chat messages are never cached (they're conversational)
+  // Trade reactions are cached by context fingerprint
   const latestSig =
     recentTrades[0]?.signature ||
     recentTrades[0]?.timestamp ||
     'none'
-  const cacheKey = `${emotion}|${Math.round((sessionPnl ?? 0) * 10000)}|${latestSig}`
+  const cacheKey = userMessage
+    ? null
+    : `${emotion}|${Math.round((sessionPnl ?? 0) * 10000)}|${latestSig}`
 
-  if (cache.has(cacheKey)) {
+  if (cacheKey && cache.has(cacheKey)) {
     return cache.get(cacheKey)
   }
 
@@ -63,6 +67,7 @@ export async function generateYomoSpeech(context) {
         recentTrades: recentTrades.slice(0, 5),
         walletAddress,
         yomoName,
+        userMessage,
       }),
     })
 
@@ -74,11 +79,13 @@ export async function generateYomoSpeech(context) {
     const data = await res.json()
     const text = data.text?.trim() || FALLBACK[emotion] || FALLBACK.neutral
 
-    // Store in cache, evicting the oldest entry when full
-    if (cache.size >= CACHE_MAX) {
-      cache.delete(cache.keys().next().value)
+    // Only cache trade-reaction responses, not user-initiated chat
+    if (cacheKey) {
+      if (cache.size >= CACHE_MAX) {
+        cache.delete(cache.keys().next().value)
+      }
+      cache.set(cacheKey, text)
     }
-    cache.set(cacheKey, text)
 
     return text
   } catch (err) {

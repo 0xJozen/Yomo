@@ -48,6 +48,7 @@ export default async function handler(req, res) {
     recentTrades = [],
     walletAddress = '',
     yomoName = '',
+    userMessage = '',
   } = req.body ?? {}
 
   // Format session PnL
@@ -81,7 +82,7 @@ export default async function handler(req, res) {
       })
       .join(', ') || 'no recent trades'
 
-  const userMessage = [
+  const contextLines = [
     'Current trading state:',
     `- Mood: ${emotion}`,
     `- Session PnL: ${pnlStr} (running ${durationStr})`,
@@ -90,11 +91,16 @@ export default async function handler(req, res) {
       ? `- Wallet: ${walletAddress.slice(0, 5)}…${walletAddress.slice(-4)}`
       : '',
     yomoName ? `- My name is ${yomoName}` : '',
-    '',
-    'React to this in 1–3 sentences as Yomo.',
   ]
-    .filter(Boolean)
-    .join('\n')
+
+  // When a user typed something, frame it as a direct reply; otherwise react to trades
+  if (userMessage) {
+    contextLines.push('', `The user says: "${userMessage}"`, '', 'Reply directly to them in 1–3 sentences as Yomo.')
+  } else {
+    contextLines.push('', 'React to this trading situation in 1–3 sentences as Yomo.')
+  }
+
+  const userMessageBody = contextLines.filter(Boolean).join('\n')
 
   try {
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
@@ -108,7 +114,7 @@ export default async function handler(req, res) {
         model: 'claude-haiku-3-5-20251001',
         max_tokens: 80,
         system: YOMO_SYSTEM,
-        messages: [{ role: 'user', content: userMessage }],
+        messages: [{ role: 'user', content: userMessageBody }],
       }),
     })
 

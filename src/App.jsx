@@ -6,7 +6,7 @@ import SpeechBubble from './components/SpeechBubble'
 import WalletConnect from './components/WalletConnect'
 import ThemeToggle from './components/ThemeToggle'
 import WalletInfoPanel from './components/WalletInfoPanel'
-import JournalPanel from './components/JournalPanel'
+import ChatPanel from './components/ChatPanel'
 import { getWalletActivity } from './utils/walletService'
 import { getVariantForAddress, saveVariantForAddress } from './utils/walletValidation'
 import { generateYomoSpeech } from './utils/claudeService'
@@ -253,6 +253,7 @@ function App() {
   const [showWelcomeBackOnMain, setShowWelcomeBackOnMain] = useState(false)
   const [displayedWallet, setDisplayedWallet] = useState('')
   const [walletTransactions, setWalletTransactions] = useState([])
+  const [walletFetching, setWalletFetching] = useState(false)
   const [showStats, setShowStats] = useState(true)
   const [sessionDisplay, setSessionDisplay] = useState({ active: false, elapsed: 0, pnl: 0 })
   const hasShownWelcomeBack = useRef(false)
@@ -277,9 +278,8 @@ function App() {
     if (saved) setDisplayedWallet(saved)
   }, [isLoading, showOnboarding, displayedWallet])
 
-  // Emotion reaction bubble — { text, loading } | null
-  const [heliusReactionBubble, setHeliusReactionBubble] = useState(null)
-  const heliusReactionTimeoutRef = useRef(null)
+  // Ref for pushing Yomo trade-reaction messages into ChatPanel
+  const addYomoToChatRef = useRef(null)
 
   // Mirror displayedWallet into a ref so memoised callbacks always read the latest value
   const displayedWalletRef = useRef('')
@@ -308,39 +308,28 @@ function App() {
   }, [])
 
   /**
-   * Calls Claude to generate a speech bubble, shows a loading state while
-   * waiting, then displays the result for `displayMs` milliseconds.
-   * Accepts an optional `onHide` callback run when the bubble auto-dismisses.
-   * Never throws — falls back to a static string on API failure.
+   * Generates a Yomo trade reaction via Claude and pushes it into ChatPanel.
+   * Accepts an optional afterCb run once the message has been pushed.
+   * Never throws — claudeService falls back gracefully on API errors.
    */
-  const fireClaude = useCallback(async (emotionArg, txsForContext, onHide = null, displayMs = 7000) => {
-    if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
-    setHeliusReactionBubble({ loading: true, text: '' })
-
-    const sessionPnl = sessionCumulativePnlRef.current
-    const sessionDuration =
-      sessionStartTsRef.current > 0
-        ? Math.floor(Date.now() / 1000) - sessionStartTsRef.current
-        : 0
-
+  const pushTradeReaction = useCallback(async (emotionArg, txsForContext, afterCb = null) => {
+    const now = Math.floor(Date.now() / 1000)
     const text = await generateYomoSpeech({
       emotion: emotionArg,
-      sessionPnl,
-      sessionDuration,
-      recentTrades: (txsForContext || []).slice(0, 5),
-      walletAddress: displayedWalletRef.current,
-      yomoName: localStorage.getItem('yomo_name') || '',
+      sessionPnl:      sessionCumulativePnlRef.current,
+      sessionDuration: sessionStartTsRef.current > 0
+        ? now - sessionStartTsRef.current
+        : 0,
+      recentTrades:    (txsForContext || []).slice(0, 5),
+      walletAddress:   displayedWalletRef.current,
+      yomoName:        localStorage.getItem('yomo_name') || '',
     })
+    addYomoToChatRef.current?.(text)
+    afterCb?.()
+  }, []) // all mutable state accessed via refs; generateYomoSpeech is module-level stable
 
-    setHeliusReactionBubble({ loading: false, text })
-    heliusReactionTimeoutRef.current = setTimeout(() => {
-      setHeliusReactionBubble(null)
-      if (onHide) onHide()
-    }, displayMs)
-  }, []) // all mutable state accessed via refs; setters are referentially stable
-
-  const fireClaudeRef = useRef(fireClaude)
-  fireClaudeRef.current = fireClaude
+  const pushTradeReactionRef = useRef(pushTradeReaction)
+  pushTradeReactionRef.current = pushTradeReaction
 
   // 1-second ticker: keeps sessionDisplay in sync with refs without causing extra re-renders in the heavy logic
   useEffect(() => {
@@ -386,13 +375,13 @@ function App() {
         const sessionEmotion = session.cumulativePnl > 0 ? 'happy' : session.cumulativePnl < 0 ? 'sad' : 'neutral'
         setEmotion(sessionEmotion)
         localStorage.setItem('yomo_emotion', sessionEmotion)
-        // Ask Claude to react to the current session state
-        fireClaudeRef.current(sessionEmotion, allTxs)
+        // Push Claude's reaction to the chat panel
+        pushTradeReactionRef.current(sessionEmotion, allTxs)
       } else {
         const emotion = result.emotion || 'neutral'
         setEmotion(emotion)
         localStorage.setItem('yomo_emotion', emotion)
-        fireClaudeRef.current(emotion, allTxs)
+        pushTradeReactionRef.current(emotion, allTxs)
       }
 
       return
@@ -423,8 +412,8 @@ function App() {
       const newEmotion = latestNewSolChange > 0 ? 'happy' : 'sad'
       setEmotion(newEmotion)
       localStorage.setItem('yomo_emotion', newEmotion)
-      // Ask Claude to react; after bubble auto-hides, restore session-wide emotion
-      fireClaudeRef.current(newEmotion, allTxs, applySessionEmotion)
+      // Push Claude's trade reaction to chat; restore session-wide emotion once done
+      pushTradeReactionRef.current(newEmotion, allTxs, applySessionEmotion)
     } else if (sessionStartTsRef.current !== 0) {
       applySessionEmotion()
     }
@@ -440,8 +429,10 @@ function App() {
   useEffect(() => {
     if (isLoading || showOnboarding || !displayedWallet) return
     let cancelled = false
+    setWalletFetching(true)
     getWalletActivity(displayedWallet).then((result) => {
       if (cancelled) return
+      setWalletFetching(false)
       console.log('Helius getWalletActivity result:', {
         transactionCount: result.transactionCount,
         recentActivity: result.recentActivity,
@@ -452,10 +443,7 @@ function App() {
     })
     return () => {
       cancelled = true
-      if (heliusReactionTimeoutRef.current) {
-        clearTimeout(heliusReactionTimeoutRef.current)
-        heliusReactionTimeoutRef.current = null
-      }
+      setWalletFetching(false)
     }
   }, [isLoading, showOnboarding, displayedWallet])
 
@@ -679,7 +667,7 @@ function App() {
 
   const showMainApp = !isLoading && !showOnboarding
 
-  // isClaimed          — active Phantom session (drives Disconnect btn + JournalPanel)
+  // isClaimed          — active Phantom session (drives Disconnect btn)
   // claimedWalletAddr  — persists through disconnect so badge stays green on re-view
   // isViewingOwnWallet — badge is green whenever the displayed wallet was ever claimed here
   const isClaimed          = localStorage.getItem('connectedViaPhantom') === 'true'
@@ -768,6 +756,41 @@ function App() {
             onViewWallet={handleViewWallet}
             theme={theme}
           />
+        ) : walletFetching ? (
+          /* ── Wallet loading state — glowing eyes like intro ── */
+          <div className="flex flex-col items-center gap-4">
+            <div className="flex gap-8 mb-1">
+              {[0, 0.15].map((delay, i) => (
+                <div
+                  key={i}
+                  className="h-1 w-12 rounded-full"
+                  style={{
+                    backgroundColor: variantColors[variant],
+                    boxShadow: `0 0 16px ${variantColors[variant]}, 0 0 32px ${variantColors[variant]}`,
+                    animation: `pulse 2s ease-in-out ${delay}s infinite`,
+                  }}
+                />
+              ))}
+            </div>
+            <div
+              className="h-1 w-8 rounded-full"
+              style={{
+                backgroundColor: variantColors[variant],
+                boxShadow: `0 0 12px ${variantColors[variant]}, 0 0 24px ${variantColors[variant]}`,
+                animation: 'pulse 2s ease-in-out 0.1s infinite',
+              }}
+            />
+            <p
+              className="font-mono text-xs mt-2"
+              style={{
+                color: variantColors[variant],
+                opacity: 0.7,
+                animation: 'pulse 2s ease-in-out infinite',
+              }}
+            >
+              fetching trades…
+            </p>
+          </div>
         ) : (
           /* Panel + Yomo side by side, scaled as one unit */
           <div
@@ -870,13 +893,6 @@ function App() {
                 {showWelcomeBack && (
                   <SpeechBubble text="welcome back! 👋" isVisible={true} />
                 )}
-                {heliusReactionBubble && !showWelcomeBack && (
-                  <SpeechBubble
-                    text={heliusReactionBubble.loading ? '...' : heliusReactionBubble.text}
-                    isVisible={true}
-                    loading={heliusReactionBubble.loading}
-                  />
-                )}
 
               </div>
 
@@ -937,10 +953,18 @@ function App() {
 
             </div>
 
-            {/* Right: journal panel — claimed wallets only */}
-            {isClaimed && (
-              <JournalPanel theme={theme} />
-            )}
+            {/* Right: chat panel (all viewers; Notes tab only for own wallet) */}
+            <ChatPanel
+              theme={theme}
+              isOwner={isViewingOwnWallet}
+              emotion={emotion}
+              sessionPnl={sessionDisplay.pnl}
+              sessionDuration={sessionDisplay.elapsed}
+              recentTrades={walletTransactions.slice(0, 5)}
+              walletAddress={displayedWallet}
+              yomoName={yomoDisplayName}
+              addMessageRef={addYomoToChatRef}
+            />
           </div>
         )}
       </div>
