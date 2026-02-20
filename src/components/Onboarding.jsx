@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import Yomo from './Yomo'
-import { validateSolanaAddress } from '../utils/walletValidation'
+import { validateSolanaAddress, getVariantForAddress, saveVariantForAddress } from '../utils/walletValidation'
 
 const variantColors = {
   dawn:     '#F5E6D3',
@@ -76,6 +76,59 @@ function playClaimChime() {
     setTimeout(() => { try { ctx.close() } catch { /* ignore */ } }, 1400)
   } catch {
     // Web Audio API unavailable (e.g. secure-context restriction) — skip silently
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Celebration sound — 5-note ascending C→E→G→C'→E' with octave harmonics
+// More elaborate than the startup chime: fuller, brighter, triumphant feel
+// ─────────────────────────────────────────────────────────────────────────────
+function playCelebrationSound() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext
+    if (!AudioCtx) return
+    const ctx = new AudioCtx()
+
+    // C5 E5 G5 C6 E6 — full major chord expansion, two octaves
+    const notes = [523.25, 659.25, 783.99, 1046.5, 1318.5]
+
+    notes.forEach((freq, i) => {
+      const isLast   = i === notes.length - 1
+      const start    = ctx.currentTime + i * 0.14
+      const peak     = isLast ? 0.18 : 0.14
+      const decay    = isLast ? 1.1 : 0.45
+      const duration = isLast ? 1.3 : 0.55
+
+      // Primary tone
+      const osc  = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.type = 'sine'
+      osc.frequency.value = freq
+      gain.gain.setValueAtTime(0, start)
+      gain.gain.linearRampToValueAtTime(peak, start + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.001, start + decay)
+      osc.start(start)
+      osc.stop(start + duration)
+
+      // Soft octave harmonic for shimmer
+      const osc2  = ctx.createOscillator()
+      const gain2 = ctx.createGain()
+      osc2.connect(gain2)
+      gain2.connect(ctx.destination)
+      osc2.type = 'sine'
+      osc2.frequency.value = freq * 2
+      gain2.gain.setValueAtTime(0, start)
+      gain2.gain.linearRampToValueAtTime(peak * 0.28, start + 0.02)
+      gain2.gain.exponentialRampToValueAtTime(0.001, start + decay * 0.55)
+      osc2.start(start)
+      osc2.stop(start + duration * 0.65)
+    })
+
+    setTimeout(() => { try { ctx.close() } catch { /* ignore */ } }, 2200)
+  } catch {
+    // silently skip
   }
 }
 
@@ -215,7 +268,7 @@ const NameInputStep = ({ label, placeholder, value, onChange, onSkip, onContinue
 // Main component
 // ─────────────────────────────────────────────────────────────────────────────
 
-const Onboarding = ({ onComplete, theme = 'night' }) => {
+const Onboarding = ({ onComplete, onViewWallet, theme = 'night' }) => {
   // Detect a returning claimed user (connectedViaPhantom + stored wallet)
   const hasClaimed = (
     localStorage.getItem('connectedViaPhantom') === 'true' &&
@@ -228,62 +281,63 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
   const [showBeginFlow, setShowBeginFlow]   = useState(false)
   const [showDocs, setShowDocs]             = useState(false)
 
-  // For returning claimed users show their stored variant; otherwise random
+  // For returning claimed users show their stored per-wallet variant; otherwise random
   const [variant, setVariant] = useState(() => {
-    const stored = localStorage.getItem('selectedVariant') || localStorage.getItem('yomo_variant')
-    if (stored && ['dawn', 'sage', 'twilight'].includes(stored)) return stored
+    const wallet = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address')
+    if (wallet) {
+      const perAddr = localStorage.getItem(`yomo_variant_${wallet}`)
+      if (perAddr && ['dawn', 'sage', 'twilight'].includes(perAddr)) return perAddr
+    }
+    const global = localStorage.getItem('selectedVariant') || localStorage.getItem('yomo_variant')
+    if (global && ['dawn', 'sage', 'twilight'].includes(global)) return global
     const variants = ['dawn', 'sage', 'twilight']
     return variants[Math.floor(Math.random() * variants.length)]
   })
 
-  // Claim wizard — steps: null | 1 (greeting) | 2 (variant) | 3 (yomo name) | 4 (user name) | 5 (finale)
+  // Claim wizard — steps: null | 1 (greeting) | 2 (variant) | 3 (yomo name) | 4 (user name) | 5 (CLAIM)
   const [claimStep, setClaimStep]           = useState(null)
   const [phantomAddress, setPhantomAddress] = useState('')
   const [yomoName, setYomoName]             = useState('')
   const [userName, setUserName]             = useState('')
+  const [isClaiming, setIsClaiming]         = useState(false) // true while claim animation plays
 
-  // Paste-address flow
+  // Paste-address flow (new-user BEGIN form)
   const [walletAddress, setWalletAddress]   = useState('')
   const [walletError, setWalletError]       = useState(null)
   const [isConnecting, setIsConnecting]     = useState(false)
 
+  // Wallet-search for claimed-user landing
+  const [searchAddress, setSearchAddress]   = useState('')
+  const [searchError, setSearchError]       = useState('')
+
   // ── Mount: greeting animation ───────────────────────────────────────────────
   useEffect(() => {
-    setEmotion('neutral')
-    setShowSpeechBubble(false)
-    const t = setTimeout(() => {
+    // Claimed users see Yomo happy immediately; new users get the neutral→happy reveal
+    if (hasClaimed) {
       setEmotion('happy')
       setShowSpeechBubble(true)
-      setSpeechText(hasClaimed ? "welcome back! 👋" : "hi, i'm yomo! 👋")
-    }, 1000)
-    return () => clearTimeout(t)
+      setSpeechText("welcome back! 👋")
+    } else {
+      setEmotion('neutral')
+      setShowSpeechBubble(false)
+      const t = setTimeout(() => {
+        setEmotion('happy')
+        setShowSpeechBubble(true)
+        setSpeechText("hi, i'm yomo! 👋")
+      }, 1000)
+      return () => clearTimeout(t)
+    }
   // hasClaimed is read-once from localStorage at mount — stable for component lifetime
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ── Step 5: final speech → auto-complete after 2.5 s ───────────────────────
+  // ── Step 5: show the CLAIM prompt ───────────────────────────────────────────
   useEffect(() => {
-    if (claimStep !== 5 || !phantomAddress) return
-    setSpeechText("i'll be watching your trades and keeping you company 🧘")
+    if (claimStep !== 5) return
+    setSpeechText('ready to make it official? ✨')
     setShowSpeechBubble(true)
     setEmotion('happy')
-
-    const t = setTimeout(() => {
-      localStorage.setItem('hasCompletedOnboarding', 'true')
-      localStorage.setItem('selectedVariant', variant)
-      localStorage.setItem('walletAddress', phantomAddress)
-      localStorage.setItem('yomo_onboarding_completed', 'true')
-      localStorage.setItem('yomo_variant', variant)
-      localStorage.setItem('yomo_wallet_address', phantomAddress)
-      localStorage.setItem('yomo_emotion', 'neutral')
-      localStorage.setItem('connectedViaPhantom', 'true')
-      if (yomoName.trim()) localStorage.setItem('yomo_name', yomoName.trim())
-      if (userName.trim()) localStorage.setItem('user_name', userName.trim())
-      onComplete(variant, phantomAddress, 'neutral')
-    }, 2500)
-
-    return () => clearTimeout(t)
-  }, [claimStep, phantomAddress, variant, yomoName, userName, onComplete])
+  }, [claimStep])
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -295,19 +349,50 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
     onComplete(storedVariant, storedAddress, storedEmotion)
   }
 
-  const completeOnboarding = (address, connectedViaPhantomFlag) => {
+  /** User clicked CLAIM — play sound, animate, save, celebrate, then enter app. */
+  const handleClaim = () => {
+    if (isClaiming) return
+    playCelebrationSound()
+    setIsClaiming(true)
+
+    // Persist all claim data
     localStorage.setItem('hasCompletedOnboarding', 'true')
+    localStorage.setItem('yomo_onboarding_completed', 'true')
     localStorage.setItem('selectedVariant', variant)
+    localStorage.setItem('yomo_variant', variant)
+    localStorage.setItem('walletAddress', phantomAddress)
+    localStorage.setItem('yomo_wallet_address', phantomAddress)
+    localStorage.setItem('yomo_claimed_wallet', phantomAddress)  // survives disconnect
+    localStorage.setItem('yomo_emotion', 'neutral')
+    localStorage.setItem('connectedViaPhantom', 'true')
+    saveVariantForAddress(phantomAddress, variant)               // per-wallet variant key
+    if (yomoName.trim()) localStorage.setItem('yomo_name', yomoName.trim())
+    if (userName.trim()) localStorage.setItem('user_name', userName.trim())
+
+    // Reaction
+    setSpeechText('i am now yours! 🌟')
+    setShowSpeechBubble(true)
+
+    setTimeout(() => {
+      onComplete(variant, phantomAddress, 'neutral')
+    }, 2000)
+  }
+
+  const completeOnboarding = (address, connectedViaPhantomFlag) => {
+    // For view-only wallets use the deterministic per-wallet variant (never overwrite a claim)
+    const resolvedVariant = getVariantForAddress(address)
+    localStorage.setItem('hasCompletedOnboarding', 'true')
+    localStorage.setItem('selectedVariant', resolvedVariant)
     localStorage.setItem('walletAddress', address)
     localStorage.setItem('yomo_onboarding_completed', 'true')
-    localStorage.setItem('yomo_variant', variant)
+    localStorage.setItem('yomo_variant', resolvedVariant)
     localStorage.setItem('yomo_wallet_address', address)
     localStorage.setItem('yomo_emotion', 'neutral')
     // Only promote to claimed — never demote (Disconnect is the only path that clears it)
     if (connectedViaPhantomFlag) {
       localStorage.setItem('connectedViaPhantom', 'true')
     }
-    onComplete(variant, address, 'neutral')
+    onComplete(resolvedVariant, address, 'neutral')
   }
 
   /** Connect via Phantom → fire chime + start 5-step claim wizard. */
@@ -334,9 +419,32 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
     try {
       const response = await window.solana.connect()
       const address  = response.publicKey.toString()
-      setPhantomAddress(address)
       setIsConnecting(false)
 
+      // ── Reconnect: same wallet already claimed here — skip wizard entirely ──
+      const claimedWallet = localStorage.getItem('yomo_claimed_wallet')
+      if (claimedWallet === address) {
+        // Restore session keys so the app behaves as if onboarding was just completed
+        localStorage.setItem('connectedViaPhantom', 'true')
+        localStorage.setItem('hasCompletedOnboarding', 'true')
+        localStorage.setItem('yomo_onboarding_completed', 'true')
+        localStorage.setItem('walletAddress', address)
+        localStorage.setItem('yomo_wallet_address', address)
+        const restoredVariant = getVariantForAddress(address)
+        localStorage.setItem('selectedVariant', restoredVariant)
+        localStorage.setItem('yomo_variant', restoredVariant)
+        onComplete(restoredVariant, address, localStorage.getItem('yomo_emotion') || 'neutral')
+        return
+      }
+
+      // ── Legacy: connectedViaPhantom still set (session not fully cleared) ──
+      if (hasClaimed) {
+        handleReturnToYomo()
+        return
+      }
+
+      // ── New claim wizard ──────────────────────────────────────────────────
+      setPhantomAddress(address)
       playClaimChime()
       setClaimStep(1)
       setSpeechText('a new companion awakens... 🌱')
@@ -353,6 +461,16 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
         setWalletError('Failed to connect — please try again')
       }
     }
+  }
+
+  /** Load any wallet in view-only mode from the claimed-user search bar. */
+  const handleSearchWallet = () => {
+    const trimmed = searchAddress.trim()
+    if (!trimmed) { setSearchError('Enter a Solana wallet address'); return }
+    const { isValid, error } = validateSolanaAddress(trimmed)
+    if (!isValid) { setSearchError(error); return }
+    setSearchError('')
+    if (onViewWallet) onViewWallet(trimmed)
   }
 
   const handlePasteSubmit = () => {
@@ -393,11 +511,16 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
 
         {/* Yomo + speech bubble */}
         <div className="relative flex items-center justify-center mb-6">
-          <Yomo
-            emotion={emotion}
-            variant={variant}
-            variantColor={variantColors[variant]}
-          />
+          <motion.div
+            animate={isClaiming ? { scale: [1, 1.13, 0.93, 1.09, 0.97, 1] } : {}}
+            transition={{ duration: 0.65, ease: 'easeInOut' }}
+          >
+            <Yomo
+              emotion={emotion}
+              variant={variant}
+              variantColor={variantColors[variant]}
+            />
+          </motion.div>
 
           {showSpeechBubble && !showDocs && (
             <motion.div
@@ -499,12 +622,33 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
             />
           )}
 
-          {/* Step 5: farewell speech → auto-completes */}
+          {/* Step 5: CLAIM button */}
           {claimStep === 5 && (
             <StepCard key="step5">
-              <p className={`font-mono text-xs text-center opacity-50 ${theme === 'day' ? 'text-gray-600' : 'text-white'}`}>
-                setting things up…
-              </p>
+              <div className="flex flex-col items-center gap-3">
+                <motion.button
+                  onClick={handleClaim}
+                  disabled={isClaiming}
+                  className={`px-12 py-3 rounded-full font-mono text-base font-bold border-2 backdrop-blur-md transition-all disabled:cursor-not-allowed ${
+                    isClaiming
+                      ? theme === 'day'
+                        ? 'bg-green-600 text-white border-green-500 opacity-80'
+                        : 'bg-green-500/40 text-white border-green-400/60 opacity-80'
+                      : theme === 'day'
+                        ? 'bg-slate-800 text-white border-slate-600 hover:bg-slate-700 hover:scale-105'
+                        : 'bg-white/20 text-white border-white/60 hover:bg-white/30 hover:scale-105'
+                  }`}
+                  whileHover={isClaiming ? {} : { scale: 1.06 }}
+                  whileTap={isClaiming ? {} : { scale: 0.97 }}
+                >
+                  {isClaiming ? 'Claimed! 🌟' : 'CLAIM'}
+                </motion.button>
+                {!isClaiming && (
+                  <p className={`font-mono text-[10px] opacity-40 ${theme === 'day' ? 'text-gray-600' : 'text-white'}`}>
+                    binds this Yomo to your wallet
+                  </p>
+                )}
+              </div>
             </StepCard>
           )}
         </AnimatePresence>
@@ -518,7 +662,8 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
             className="flex flex-col items-center gap-3"
           >
             {hasClaimed ? (
-              <>
+              <div className="w-full flex flex-col items-center gap-4">
+                {/* Primary: return to own Yomo */}
                 <motion.button
                   onClick={handleReturnToYomo}
                   className={`px-8 py-2.5 rounded-full font-mono text-sm border-2 backdrop-blur-md font-medium transition-all ${
@@ -531,15 +676,59 @@ const Onboarding = ({ onComplete, theme = 'night' }) => {
                 >
                   Go to your Yomo →
                 </motion.button>
+
+                {/* Divider */}
+                <div className="flex items-center gap-3 w-full max-w-xs">
+                  <div className={`flex-1 h-px ${theme === 'day' ? 'bg-gray-300' : 'bg-white/20'}`} />
+                  <span className={`font-mono text-[10px] uppercase tracking-widest ${theme === 'day' ? 'text-gray-400' : 'text-white/30'}`}>
+                    or view any wallet
+                  </span>
+                  <div className={`flex-1 h-px ${theme === 'day' ? 'bg-gray-300' : 'bg-white/20'}`} />
+                </div>
+
+                {/* Search bar */}
+                <div className="w-full max-w-xs">
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={searchAddress}
+                      onChange={(e) => { setSearchAddress(e.target.value); setSearchError('') }}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSearchWallet()}
+                      placeholder="search any wallet..."
+                      className={`w-full pl-4 pr-10 py-2.5 rounded-xl font-mono text-sm border-2 transition-all focus:outline-none focus:border-accent ${
+                        theme === 'day'
+                          ? 'bg-white border-gray-200 text-gray-800 placeholder-gray-400'
+                          : 'bg-white/15 border-white/25 text-white placeholder-white/40'
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSearchWallet}
+                      aria-label="Search wallet"
+                      className={`absolute right-2.5 top-1/2 -translate-y-1/2 transition-opacity hover:opacity-70 ${
+                        theme === 'day' ? 'text-gray-400' : 'text-white/40'
+                      }`}
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
+                      </svg>
+                    </button>
+                  </div>
+                  {searchError && (
+                    <p className="mt-1.5 font-mono text-xs text-red-400">{searchError}</p>
+                  )}
+                </div>
+
+                {/* DOCS — subtle, below search */}
                 <motion.button
                   onClick={() => setShowDocs(true)}
-                  className={`px-6 py-1.5 rounded-full font-mono text-xs border backdrop-blur-md transition-all opacity-60 hover:opacity-90 ${btnMinimal}`}
+                  className={`px-5 py-1 rounded-full font-mono text-[11px] border backdrop-blur-md transition-all opacity-50 hover:opacity-80 ${btnMinimal}`}
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.98 }}
                 >
                   DOCS
                 </motion.button>
-              </>
+              </div>
             ) : (
               <div className="flex gap-4">
                 <motion.button

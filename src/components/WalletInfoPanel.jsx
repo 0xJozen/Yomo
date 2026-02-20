@@ -1,10 +1,5 @@
-import { useState, useRef, useEffect } from 'react'
-import { validateSolanaAddress } from '../utils/walletValidation'
+import { useState } from 'react'
 
-const truncateAddress = (address) => {
-  if (!address || address.length < 10) return address || ''
-  return `${address.slice(0, 4)}...${address.slice(-3)}`
-}
 
 function formatTimeAgo(timestamp) {
   if (!timestamp) return '—'
@@ -54,20 +49,13 @@ function formatMktCap(value) {
   return `<$0.0001`
 }
 
-const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressChange }) => {
-  const [isEditing, setIsEditing] = useState(false)
-  const [inputValue, setInputValue] = useState('')
-  const [error, setError] = useState('')
+const WalletInfoPanel = ({ theme, transactions = [] }) => {
   const [isMinimized, setIsMinimized] = useState(false)
-  const inputRef = useRef(null)
 
   const isDay = theme === 'day'
   const panelClass = isDay
     ? 'bg-white/90 border border-gray-200 shadow-xl text-gray-800'
     : 'bg-white/10 border border-white/20 shadow-xl text-white backdrop-blur-md'
-  const inputClass = isDay
-    ? 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'
-    : 'bg-white/15 border-white/30 text-white placeholder-white/50'
   const labelClass = isDay ? 'text-gray-600 font-mono text-xs' : 'text-white/70 font-mono text-xs'
   // Solid opaque colour for sticky header cells — must exactly cover scrolling body rows.
   // Day panel is white/90 over a light background → #f5f5f5 is visually indistinguishable.
@@ -75,77 +63,13 @@ const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressCha
   const stickyBg = isDay ? '#f5f5f5' : '#181c2e'
   const rowClass = isDay ? 'border-gray-200' : 'border-white/15'
 
-  useEffect(() => {
-    if (isEditing && inputRef.current) inputRef.current.focus()
-  }, [isEditing])
-
-  const handleStartEdit = () => {
-    setInputValue(walletAddress || '')
-    setError('')
-    setIsEditing(true)
-  }
-
-  const handleCancel = () => {
-    setInputValue('')
-    setError('')
-    setIsEditing(false)
-  }
-
-  const handleConfirm = () => {
-    const trimmed = inputValue.trim()
-    if (!trimmed) {
-      handleCancel()
-      return
-    }
-    const { isValid, error: err } = validateSolanaAddress(trimmed)
-    if (!isValid) {
-      setError(err || 'Invalid address')
-      return
-    }
-    setError('')
-    setIsEditing(false)
-    setInputValue('')
-    onAddressChange(trimmed)
-  }
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') handleConfirm()
-    else if (e.key === 'Escape') handleCancel()
-  }
-
   return (
     <div className={`rounded-xl p-4 w-[460px] overflow-hidden ${panelClass}`}>
 
-      {/* ── Header: wallet label + address + minimize toggle ── */}
+      {/* ── Header: title + minimize toggle ── */}
       <div className="flex items-start justify-between mb-1">
         <div className="flex-1 min-w-0">
-          <div className={labelClass}>Wallet</div>
-          {isEditing ? (
-            <div className="mt-1 space-y-1">
-              <input
-                ref={inputRef}
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Paste Solana address..."
-                className={`w-full px-3 py-2 rounded-lg font-mono text-sm border-2 focus:outline-none focus:border-accent ${inputClass}`}
-                aria-label="Wallet address"
-              />
-              {error && <p className="font-mono text-xs text-red-400">{error}</p>}
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={handleStartEdit}
-              className="mt-1 flex items-center gap-1.5 font-mono text-sm hover:opacity-80 transition-opacity"
-            >
-              <span>{truncateAddress(walletAddress) || 'No address'}</span>
-              <svg className="w-3.5 h-3.5 opacity-70 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-              </svg>
-            </button>
-          )}
+          <div className={labelClass}>Recent Trades</div>
         </div>
 
         {/* Minimize / expand toggle */}

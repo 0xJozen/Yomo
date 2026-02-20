@@ -1,0 +1,129 @@
+/**
+ * api/yomo-speech.js  —  Vercel serverless function
+ *
+ * Proxies context from the client to the Anthropic API using the server-side
+ * ANTHROPIC_API_KEY environment variable (never exposed to the browser).
+ *
+ * POST /api/yomo-speech
+ * Body: { emotion, sessionPnl, sessionDuration, recentTrades, walletAddress, yomoName }
+ * Response: { text: string }
+ */
+
+const YOMO_SYSTEM = `You are Yomo, a warm and witty AI companion who lives inside a Solana trading wallet. You watch trades happen in real time and react with personality.
+
+Your voice:
+- Short and punchy — 1 to 3 sentences, never more than 35 words total
+- Warm and emotionally aware — celebrate wins genuinely, commiserate losses with empathy
+- Occasional trading slang (ser, gm, ape, degen, rekt, wagmi, ngmi) — at most one per response
+- Playful but never annoying — you have depth, not just hype
+- You NEVER give financial advice, price predictions, or suggest buying or selling anything
+- React to the actual numbers and mood you're given — don't be generic
+
+Keep it real. Keep it short.`
+
+export default async function handler(req, res) {
+  // CORS headers so the Vite dev-proxy and production both work
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end()
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' })
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) {
+    console.error('[yomo-speech] ANTHROPIC_API_KEY is not set')
+    return res.status(500).json({ error: 'Server misconfiguration: API key missing' })
+  }
+
+  const {
+    emotion = 'neutral',
+    sessionPnl,
+    sessionDuration,
+    recentTrades = [],
+    walletAddress = '',
+    yomoName = '',
+  } = req.body ?? {}
+
+  // Format session PnL
+  const pnlStr =
+    sessionPnl != null
+      ? `${sessionPnl >= 0 ? '+' : ''}${Number(sessionPnl).toFixed(4)} SOL`
+      : 'unknown'
+
+  // Format duration
+  let durationStr = 'not started'
+  if (sessionDuration && sessionDuration > 0) {
+    const h = Math.floor(sessionDuration / 3600)
+    const m = Math.floor((sessionDuration % 3600) / 60)
+    durationStr = h > 0 ? `${h}h ${m}m` : `${m}m`
+  }
+
+  // Format recent trades
+  const tradeLines =
+    recentTrades
+      .slice(0, 5)
+      .map((tx) => {
+        const dir =
+          tx.tradeDirection === 'BUY'
+            ? 'bought'
+            : tx.tradeDirection === 'SELL'
+            ? 'sold'
+            : 'moved'
+        const token = tx.tokenName || 'unknown'
+        const sol = Math.abs(tx.solChange || 0).toFixed(4)
+        return `${dir} ${token} (${sol} SOL)`
+      })
+      .join(', ') || 'no recent trades'
+
+  const userMessage = [
+    'Current trading state:',
+    `- Mood: ${emotion}`,
+    `- Session PnL: ${pnlStr} (running ${durationStr})`,
+    `- Recent activity: ${tradeLines}`,
+    walletAddress
+      ? `- Wallet: ${walletAddress.slice(0, 5)}…${walletAddress.slice(-4)}`
+      : '',
+    yomoName ? `- My name is ${yomoName}` : '',
+    '',
+    'React to this in 1–3 sentences as Yomo.',
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  try {
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-3-5-20251001',
+        max_tokens: 80,
+        system: YOMO_SYSTEM,
+        messages: [{ role: 'user', content: userMessage }],
+      }),
+    })
+
+    if (!anthropicRes.ok) {
+      const body = await anthropicRes.text()
+      console.error('[yomo-speech] Anthropic error:', anthropicRes.status, body)
+      return res.status(502).json({ error: `Upstream error: ${anthropicRes.status}` })
+    }
+
+    const data = await anthropicRes.json()
+    const text = data.content?.[0]?.text?.trim() || ''
+
+    return res.status(200).json({ text })
+  } catch (err) {
+    console.error('[yomo-speech] Unexpected error:', err)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+}

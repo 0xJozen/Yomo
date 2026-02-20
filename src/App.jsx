@@ -8,6 +8,8 @@ import ThemeToggle from './components/ThemeToggle'
 import WalletInfoPanel from './components/WalletInfoPanel'
 import JournalPanel from './components/JournalPanel'
 import { getWalletActivity } from './utils/walletService'
+import { getVariantForAddress, saveVariantForAddress } from './utils/walletValidation'
+import { generateYomoSpeech } from './utils/claudeService'
 import './styles/animations.css'
 
 const YOMO_VERSION = '1.0'
@@ -34,7 +36,7 @@ function ensureYomoStorageVersion() {
   const keysToRemove = [...knownKeys]
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
-    if (key && key.includes('yomo') && key !== 'yomo_journal' && !keysToRemove.includes(key)) keysToRemove.push(key)
+    if (key && key.includes('yomo') && key !== 'yomo_journal' && key !== 'yomo_claimed_wallet' && !keysToRemove.includes(key)) keysToRemove.push(key)
   }
   keysToRemove.forEach((k) => localStorage.removeItem(k))
   localStorage.setItem('yomo_version', YOMO_VERSION)
@@ -60,12 +62,6 @@ function getScale() {
   return 1.0
 }
 
-const EMOTION_REACTIONS = {
-  happy: 'your portfolio is looking good! 📈',
-  sad: 'rough patch lately... 📉',
-  sleepy: "you've been quiet lately 😴",
-  neutral: 'watching the markets... 👀'
-}
 
 const truncateWallet = (addr) => {
   if (!addr || addr.length < 10) return addr || ''
@@ -241,12 +237,14 @@ function App() {
     return saved === 'day' ? 'day' : 'night'
   })
   const [variant, setVariant] = useState(() => {
-    // Check localStorage for saved variant (new structure: selectedVariant)
-    const savedVariant = localStorage.getItem('selectedVariant') || localStorage.getItem('yomo_variant')
-    if (savedVariant && ['dawn', 'sage', 'twilight'].includes(savedVariant)) {
-      return savedVariant
+    // Per-wallet key is most specific; fall back to global key, then random
+    const wallet = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address')
+    if (wallet) {
+      const perAddr = localStorage.getItem(`yomo_variant_${wallet}`)
+      if (perAddr && ['dawn', 'sage', 'twilight'].includes(perAddr)) return perAddr
     }
-    // Default to random if no saved variant
+    const global = localStorage.getItem('selectedVariant') || localStorage.getItem('yomo_variant')
+    if (global && ['dawn', 'sage', 'twilight'].includes(global)) return global
     const variants = ['dawn', 'sage', 'twilight']
     return variants[Math.floor(Math.random() * variants.length)]
   })
@@ -279,9 +277,13 @@ function App() {
     if (saved) setDisplayedWallet(saved)
   }, [isLoading, showOnboarding, displayedWallet])
 
-  // Emotion reaction bubble (initial load or trade PnL)
-  const [heliusReactionBubble, setHeliusReactionBubble] = useState(null) // { text } or null
+  // Emotion reaction bubble — { text, loading } | null
+  const [heliusReactionBubble, setHeliusReactionBubble] = useState(null)
   const heliusReactionTimeoutRef = useRef(null)
+
+  // Mirror displayedWallet into a ref so memoised callbacks always read the latest value
+  const displayedWalletRef = useRef('')
+  displayedWalletRef.current = displayedWallet
 
   // Session-based emotion: swap-in starts session, swap-out realizes PnL, 4h inactivity resets
   const processedTxKeysRef = useRef(new Set())
@@ -304,6 +306,41 @@ function App() {
     else setEmotion('neutral')
     localStorage.setItem('yomo_emotion', pnl > 0 ? 'happy' : pnl < 0 ? 'sad' : 'neutral')
   }, [])
+
+  /**
+   * Calls Claude to generate a speech bubble, shows a loading state while
+   * waiting, then displays the result for `displayMs` milliseconds.
+   * Accepts an optional `onHide` callback run when the bubble auto-dismisses.
+   * Never throws — falls back to a static string on API failure.
+   */
+  const fireClaude = useCallback(async (emotionArg, txsForContext, onHide = null, displayMs = 7000) => {
+    if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
+    setHeliusReactionBubble({ loading: true, text: '' })
+
+    const sessionPnl = sessionCumulativePnlRef.current
+    const sessionDuration =
+      sessionStartTsRef.current > 0
+        ? Math.floor(Date.now() / 1000) - sessionStartTsRef.current
+        : 0
+
+    const text = await generateYomoSpeech({
+      emotion: emotionArg,
+      sessionPnl,
+      sessionDuration,
+      recentTrades: (txsForContext || []).slice(0, 5),
+      walletAddress: displayedWalletRef.current,
+      yomoName: localStorage.getItem('yomo_name') || '',
+    })
+
+    setHeliusReactionBubble({ loading: false, text })
+    heliusReactionTimeoutRef.current = setTimeout(() => {
+      setHeliusReactionBubble(null)
+      if (onHide) onHide()
+    }, displayMs)
+  }, []) // all mutable state accessed via refs; setters are referentially stable
+
+  const fireClaudeRef = useRef(fireClaude)
+  fireClaudeRef.current = fireClaude
 
   // 1-second ticker: keeps sessionDisplay in sync with refs without causing extra re-renders in the heavy logic
   useEffect(() => {
@@ -346,20 +383,18 @@ function App() {
         sessionStartTsRef.current = session.sessionStartTs
         lastActivityTsRef.current = session.lastActivityTs
         sessionCumulativePnlRef.current = session.cumulativePnl
-        // Emotion reflects session PnL rather than raw 24h solChange
         const sessionEmotion = session.cumulativePnl > 0 ? 'happy' : session.cumulativePnl < 0 ? 'sad' : 'neutral'
         setEmotion(sessionEmotion)
         localStorage.setItem('yomo_emotion', sessionEmotion)
-        setHeliusReactionBubble({ text: EMOTION_REACTIONS[sessionEmotion] ?? EMOTION_REACTIONS.neutral })
+        // Ask Claude to react to the current session state
+        fireClaudeRef.current(sessionEmotion, allTxs)
       } else {
         const emotion = result.emotion || 'neutral'
         setEmotion(emotion)
         localStorage.setItem('yomo_emotion', emotion)
-        setHeliusReactionBubble({ text: EMOTION_REACTIONS[emotion] ?? EMOTION_REACTIONS.neutral })
+        fireClaudeRef.current(emotion, allTxs)
       }
 
-      if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
-      heliusReactionTimeoutRef.current = setTimeout(() => setHeliusReactionBubble(null), 4000)
       return
     }
 
@@ -385,20 +420,11 @@ function App() {
     }
 
     if (latestNewSolChange !== null) {
-      const gain = Math.abs(latestNewSolChange)
-      const gainStr = gain >= 0.0001 ? gain.toFixed(4) : gain.toExponential(2)
-      if (latestNewSolChange > 0) {
-        setEmotion('happy')
-        setHeliusReactionBubble({ text: `+${gainStr} SOL! 📈` })
-      } else {
-        setEmotion('sad')
-        setHeliusReactionBubble({ text: `-${gainStr} SOL 📉` })
-      }
-      if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
-      heliusReactionTimeoutRef.current = setTimeout(() => {
-        setHeliusReactionBubble(null)
-        applySessionEmotion()
-      }, 4000)
+      const newEmotion = latestNewSolChange > 0 ? 'happy' : 'sad'
+      setEmotion(newEmotion)
+      localStorage.setItem('yomo_emotion', newEmotion)
+      // Ask Claude to react; after bubble auto-hides, restore session-wide emotion
+      fireClaudeRef.current(newEmotion, allTxs, applySessionEmotion)
     } else if (sessionStartTsRef.current !== 0) {
       applySessionEmotion()
     }
@@ -454,6 +480,7 @@ function App() {
     saveQuickSession(newAddress)
     processedTxKeysRef.current = new Set()
     resetSession()
+    setVariant(getVariantForAddress(newAddress))
     setDisplayedWallet(newAddress)
   }, [resetSession])
 
@@ -515,13 +542,10 @@ function App() {
       console.log('⏭️ Skipping onboarding (Phantom-connected, already completed)')
       // Restore wallet + variant from storage so the main app has them immediately
       const storedWallet = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address')
-      const storedVariant = localStorage.getItem('selectedVariant') || localStorage.getItem('yomo_variant')
       if (storedWallet) {
         setDisplayedWallet(storedWallet)
         saveQuickSession(storedWallet)   // extend quick-session so next load is also fast
-      }
-      if (storedVariant && ['dawn', 'sage', 'twilight'].includes(storedVariant)) {
-        setVariant(storedVariant)
+        setVariant(getVariantForAddress(storedWallet))
       }
       setShowOnboarding(false)
       setShowWelcomeBackOnMain(true)
@@ -541,6 +565,7 @@ function App() {
     localStorage.setItem('yomo_variant', selectedVariant)
     if (walletAddress) {
       localStorage.setItem('yomo_wallet_address', walletAddress)
+      saveVariantForAddress(walletAddress, selectedVariant)
     }
     localStorage.setItem('yomo_emotion', initialEmotion)
     
@@ -570,9 +595,13 @@ function App() {
     setShowOnboarding(true)
   }, [resetSession])
 
-  /** Full disconnect — clears claimed state so the user must re-connect Phantom. */
+  /**
+   * Disconnect — fully wipes all claim data so the next visit shows a fresh
+   * landing screen (BEGIN / DOCS) and reconnecting Phantom re-runs the full
+   * claim wizard.
+   */
   const handleDisconnect = useCallback(() => {
-    const keysToRemove = [
+    const claimKeys = [
       'connectedViaPhantom',
       'hasCompletedOnboarding',
       'yomo_onboarding_completed',
@@ -583,9 +612,8 @@ function App() {
       'yomo_emotion',
       'yomo_name',
       'user_name',
-      'yomo_quick_session',
     ]
-    keysToRemove.forEach((k) => localStorage.removeItem(k))
+    claimKeys.forEach((k) => localStorage.removeItem(k))
     clearQuickSession()
     resetSession()
     processedTxKeysRef.current = new Set()
@@ -593,6 +621,19 @@ function App() {
     setWalletTransactions([])
     setHeliusReactionBubble(null)
     setShowOnboarding(true)
+  }, [resetSession])
+
+  /**
+   * View any arbitrary wallet in view-only mode without touching claim data.
+   * Used by the claimed-user landing search bar.
+   */
+  const handleViewWallet = useCallback((address) => {
+    resetSession()
+    processedTxKeysRef.current = new Set()
+    setVariant(getVariantForAddress(address))
+    setDisplayedWallet(address)
+    setWalletTransactions([])
+    setShowOnboarding(false)
   }, [resetSession])
 
   const handleThemeChange = useCallback((newTheme) => {
@@ -638,11 +679,38 @@ function App() {
 
   const showMainApp = !isLoading && !showOnboarding
 
-  // isClaimed  — the local user has a Phantom-connected wallet stored
-  // isViewingOwnWallet — badge shows green only when viewing that exact wallet
-  const isClaimed = localStorage.getItem('connectedViaPhantom') === 'true'
-  const ownWalletAddress = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address') || ''
-  const isViewingOwnWallet = isClaimed && !!ownWalletAddress && displayedWallet === ownWalletAddress
+  // isClaimed          — active Phantom session (drives Disconnect btn + JournalPanel)
+  // claimedWalletAddr  — persists through disconnect so badge stays green on re-view
+  // isViewingOwnWallet — badge is green whenever the displayed wallet was ever claimed here
+  const isClaimed          = localStorage.getItem('connectedViaPhantom') === 'true'
+  const claimedWalletAddr  = localStorage.getItem('yomo_claimed_wallet') || localStorage.getItem('walletAddress') || ''
+  const isViewingOwnWallet = !!claimedWalletAddr && displayedWallet === claimedWalletAddr
+  // Show Yomo name (set during onboarding) instead of truncated address when viewing own wallet
+  const yomoDisplayName    = isViewingOwnWallet ? (localStorage.getItem('yomo_name') || '') : ''
+
+  // Yomo name inline rename (claimed wallets only)
+  const [isEditingYomoName, setIsEditingYomoName] = useState(false)
+  const [yomoNameDraft, setYomoNameDraft]         = useState('')
+  const yomoNameInputRef                          = useRef(null)
+
+  useEffect(() => {
+    if (isEditingYomoName && yomoNameInputRef.current) yomoNameInputRef.current.focus()
+  }, [isEditingYomoName])
+
+  const handleStartYomoRename = () => {
+    setYomoNameDraft(localStorage.getItem('yomo_name') || '')
+    setIsEditingYomoName(true)
+  }
+
+  const handleCommitYomoRename = () => {
+    const trimmed = yomoNameDraft.trim()
+    localStorage.setItem('yomo_name', trimmed)
+    setIsEditingYomoName(false)
+  }
+
+  const handleCancelYomoRename = () => {
+    setIsEditingYomoName(false)
+  }
 
   return (
     <div className={`min-h-screen ${backgroundStyle} text-accent relative overflow-hidden transition-colors duration-300`}>
@@ -695,7 +763,11 @@ function App() {
             variantColor={variantColors[variant]}
           />
         ) : showOnboarding ? (
-          <Onboarding onComplete={handleOnboardingComplete} theme={theme} />
+          <Onboarding
+            onComplete={handleOnboardingComplete}
+            onViewWallet={handleViewWallet}
+            theme={theme}
+          />
         ) : (
           /* Panel + Yomo side by side, scaled as one unit */
           <div
@@ -705,22 +777,58 @@ function App() {
             {/* Left: wallet info panel */}
             <WalletInfoPanel
               theme={theme}
-              walletAddress={displayedWallet}
               transactions={walletTransactions}
-              onAddressChange={handleWalletAddressChange}
             />
 
             {/* Centre: Yomo + wallet label + session tracker */}
             <div className="flex flex-col items-center">
 
-              {/* Wallet address label + claim badge inline above Yomo */}
+              {/* Name / address label + claim badge inline above Yomo */}
               {displayedWallet && (
                 <div
-                  className={`mb-3 px-3 py-1 rounded-full font-mono text-xs tracking-wide select-none transition-colors duration-300 flex items-center gap-2 ${
+                  className={`mb-3 px-3 py-1 rounded-full font-mono text-xs tracking-wide transition-colors duration-300 flex items-center gap-2 ${
                     theme === 'day' ? 'bg-black/8 text-gray-600' : 'bg-white/10 text-white/60'
                   }`}
                 >
-                  <span>{truncateWallet(displayedWallet)}</span>
+                  {/* Editable Yomo name — only for claimed wallets */}
+                  {isClaimed && isEditingYomoName ? (
+                    <input
+                      ref={yomoNameInputRef}
+                      type="text"
+                      value={yomoNameDraft}
+                      onChange={(e) => setYomoNameDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleCommitYomoRename()
+                        if (e.key === 'Escape') handleCancelYomoRename()
+                      }}
+                      onBlur={handleCommitYomoRename}
+                      maxLength={24}
+                      placeholder="name your yomo…"
+                      className={`w-28 bg-transparent border-b outline-none font-mono text-xs ${
+                        theme === 'day' ? 'border-gray-400 text-gray-700' : 'border-white/40 text-white/80'
+                      }`}
+                    />
+                  ) : (
+                    <span title={displayedWallet}>
+                      {yomoDisplayName || truncateWallet(displayedWallet)}
+                    </span>
+                  )}
+
+                  {/* Pencil rename button — claimed wallets only, not while editing */}
+                  {isClaimed && !isEditingYomoName && (
+                    <button
+                      type="button"
+                      onClick={handleStartYomoRename}
+                      aria-label="Rename Yomo"
+                      className={`flex-shrink-0 opacity-50 hover:opacity-90 transition-opacity ${
+                        theme === 'day' ? 'text-gray-500' : 'text-white/60'
+                      }`}
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                    </button>
+                  )}
 
                   {/* Claimed / unclaimed badge dot */}
                   <div className="relative group flex-shrink-0">
@@ -762,8 +870,12 @@ function App() {
                 {showWelcomeBack && (
                   <SpeechBubble text="welcome back! 👋" isVisible={true} />
                 )}
-                {heliusReactionBubble && (
-                  <SpeechBubble text={heliusReactionBubble.text} isVisible={true} />
+                {heliusReactionBubble && !showWelcomeBack && (
+                  <SpeechBubble
+                    text={heliusReactionBubble.loading ? '...' : heliusReactionBubble.text}
+                    isVisible={true}
+                    loading={heliusReactionBubble.loading}
+                  />
                 )}
 
               </div>

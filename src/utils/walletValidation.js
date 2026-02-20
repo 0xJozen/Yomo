@@ -44,4 +44,40 @@ export const validateSolanaAddress = (address) => {
   return { isValid: true, error: null }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-wallet variant helpers
+// ─────────────────────────────────────────────────────────────────────────────
+const VARIANTS = ['dawn', 'sage', 'twilight']
+
+/**
+ * Return the variant for a given wallet address.
+ *
+ * Priority:
+ *  1. `yomo_variant_{address}` in localStorage (user-chosen or previously assigned)
+ *  2. Deterministic hash of the address — always the same value for the same address
+ *     so every viewer sees a consistent Yomo without needing a stored key.
+ *
+ * The result is saved back to localStorage on first assignment so future reads
+ * never need to recompute.
+ */
+export function getVariantForAddress(address) {
+  if (!address) return 'sage'
+  const stored = localStorage.getItem(`yomo_variant_${address}`)
+  if (stored && VARIANTS.includes(stored)) return stored
+
+  // Simple deterministic hash (djb2-style, unsigned)
+  let h = 5381
+  for (let i = 0; i < address.length; i++) {
+    h = ((h << 5) + h + address.charCodeAt(i)) >>> 0
+  }
+  const v = VARIANTS[h % VARIANTS.length]
+  try { localStorage.setItem(`yomo_variant_${address}`, v) } catch { /* quota / private mode */ }
+  return v
+}
+
+/** Persist a user-chosen variant for a specific wallet address. */
+export function saveVariantForAddress(address, variant) {
+  if (!address || !VARIANTS.includes(variant)) return
+  try { localStorage.setItem(`yomo_variant_${address}`, variant) } catch { /* quota / private mode */ }
+}
 

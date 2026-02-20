@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion'
 
-const SpeechBubble = ({ text, isVisible }) => {
+const SpeechBubble = ({ text, isVisible, loading = false }) => {
   return (
     <AnimatePresence>
       {isVisible && (
@@ -47,10 +47,20 @@ const SpeechBubble = ({ text, isVisible }) => {
                 borderRight: '10px solid rgba(255, 255, 255, 0.95)',
               }}
             />
-            
-            <p className="text-gray-800 font-mono text-sm sm:text-base relative z-10 text-center break-words leading-relaxed">
-              {text}
-            </p>
+
+            {loading ? (
+              <motion.p
+                className="text-gray-400 font-mono text-sm sm:text-base relative z-10 text-center leading-relaxed tracking-widest"
+                animate={{ opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
+              >
+                ···
+              </motion.p>
+            ) : (
+              <p className="text-gray-800 font-mono text-sm sm:text-base relative z-10 text-center break-words leading-relaxed">
+                {text}
+              </p>
+            )}
           </div>
         </motion.div>
       )}
