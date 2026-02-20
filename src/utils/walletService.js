@@ -7,9 +7,9 @@ const LAMPORTS_PER_SOL = 1e9
 
 // ── Pagination constants ──────────────────────────────────────────────────────
 const PAGE_SIZE             = 100   // transactions per Helius request
-const MAX_PAGES             = 5     // hard cap  → 500 raw transactions total
+const MAX_PAGES             = 10    // hard cap  → 1000 raw transactions total
+const PAGE_DELAY_MS         = 200   // delay between paginated requests (rate-limit safety)
 const SESSION_GAP_SEC       = 4 * 3600   // gap that breaks a trading chain (4 h)
-const PAGINATION_HORIZON_SEC = 12 * 3600  // never page further than 12 h back
 
 /**
  * Module-level cache: mint address → { symbol: string|null, marketCap: number|null }
@@ -313,16 +313,16 @@ async function resolveTokenMeta(mintAddresses) {
  */
 
 /**
- * Fetch raw Helius enhanced-transactions for `address`, paginating forward as
- * long as the active trading session may extend beyond the first page.
+ * Fetch raw Helius enhanced-transactions for `address`, paginating forward
+ * until the session boundary is found or the hard cap is reached.
  *
  * Pagination stops when ANY of the following is true:
  *   a) A page comes back empty (no more history).
- *   b) The oldest transaction on the current page is > 12 h old — the session
- *      cannot extend further back than our horizon.
- *   c) A 4-hour gap is detected between consecutive SWAP transactions in the
+ *   b) A 4-hour gap is detected between consecutive SWAP transactions in the
  *      accumulated set — the session boundary has been found.
- *   d) MAX_PAGES pages have been fetched (hard safety cap = 500 txs).
+ *   c) MAX_PAGES (10) pages have been fetched — 1000 transactions hard cap.
+ *
+ * A 200 ms delay is inserted between requests to stay within rate limits.
  *
  * @param {string} address  – trimmed Solana wallet address
  * @param {string} apiKey   – Helius API key
@@ -330,16 +330,21 @@ async function resolveTokenMeta(mintAddresses) {
  */
 async function fetchTransactionPages(address, apiKey) {
   const allRaw = []
-  let cursor = null  // signature of the oldest tx seen so far (used as `before=` cursor)
+  let cursor = null  // oldest signature seen so far — used as `&before=` cursor
   const now = Math.floor(Date.now() / 1000)
 
   for (let page = 0; page < MAX_PAGES; page++) {
+    // Rate-limit safety: wait 200 ms before every request after the first
+    if (page > 0) {
+      await new Promise((resolve) => setTimeout(resolve, PAGE_DELAY_MS))
+    }
+
     const url =
       `${HELIUS_BASE}/addresses/${address}/transactions` +
       `?api-key=${apiKey}&limit=${PAGE_SIZE}` +
       (cursor ? `&before=${cursor}` : '')
 
-    console.log(`[paginate] page=${page + 1}${cursor ? ` before=${cursor.slice(0, 8)}…` : ''}`)
+    console.log(`[paginate] page=${page + 1}/${MAX_PAGES}${cursor ? ` before=${cursor.slice(0, 8)}…` : ''}`)
 
     let pageData
     try {
@@ -355,6 +360,7 @@ async function fetchTransactionPages(address, apiKey) {
       break
     }
 
+    // (a) Empty page — no more history
     if (!pageData.length) {
       console.log(`[paginate] Empty page ${page + 1} — no more history`)
       break
@@ -370,17 +376,12 @@ async function fetchTransactionPages(address, apiKey) {
     console.log(
       `[paginate] page ${page + 1}: ${pageData.length} txs | ` +
       `newest=${Math.round((now - newestTs) / 60)}m ago | ` +
-      `oldest=${oldestTs ? Math.round((now - oldestTs) / 60) + 'm ago' : 'unknown'}`
+      `oldest=${oldestTs ? Math.round((now - oldestTs) / 60) + 'm ago' : 'unknown'} | ` +
+      `total=${allRaw.length}`
     )
 
-    // (b) Oldest tx on this page is beyond our 12-hour horizon
-    if (oldestTs > 0 && (now - oldestTs) > PAGINATION_HORIZON_SEC) {
-      console.log(`[paginate] Oldest tx is ${Math.round((now - oldestTs) / 3600)}h ago — beyond ${PAGINATION_HORIZON_SEC / 3600}h horizon, stopping`)
-      break
-    }
-
-    // (c) Check whether a 4-hour gap already exists in the accumulated SWAP chain.
-    //     If so, the session boundary has been identified and no further pages are needed.
+    // (b) Check whether a 4-hour gap already exists in the accumulated SWAP chain.
+    //     When found the session boundary is known — no further pages needed.
     const swapTimestamps = allRaw
       .filter((tx) => (tx.type || '').toUpperCase() === 'SWAP' && tx.timestamp)
       .map((tx) => Number(tx.timestamp))
@@ -388,23 +389,25 @@ async function fetchTransactionPages(address, apiKey) {
 
     let chainBroken = false
     for (let i = 1; i < swapTimestamps.length; i++) {
-      if ((swapTimestamps[i - 1] - swapTimestamps[i]) > SESSION_GAP_SEC) {
+      const gapSec = swapTimestamps[i - 1] - swapTimestamps[i]
+      if (gapSec > SESSION_GAP_SEC) {
         chainBroken = true
         console.log(
-          `[paginate] 4h gap found in SWAP chain (${Math.round((swapTimestamps[i - 1] - swapTimestamps[i]) / 60)}m) — session boundary found, stopping`
+          `[paginate] 4h gap found in SWAP chain ` +
+          `(${Math.round(gapSec / 60)}m between swaps) — session boundary found, stopping`
         )
         break
       }
     }
     if (chainBroken) break
 
-    // (d) Hard cap already checked by loop condition (page < MAX_PAGES)
+    // (c) Hard cap — loop condition handles it, but log clearly on last page
     if (page === MAX_PAGES - 1) {
-      console.log(`[paginate] Reached MAX_PAGES (${MAX_PAGES}) — stopping`)
+      console.log(`[paginate] Reached MAX_PAGES (${MAX_PAGES}) — ${allRaw.length} txs total`)
       break
     }
 
-    // Need more history — advance cursor to oldest signature on this page
+    // Advance cursor to oldest signature on this page
     if (!oldestSig) {
       console.log(`[paginate] No cursor signature on page ${page + 1} — stopping`)
       break
@@ -412,7 +415,7 @@ async function fetchTransactionPages(address, apiKey) {
     cursor = oldestSig
   }
 
-  console.log(`[paginate] Done: ${allRaw.length} raw transactions over ${Math.ceil(allRaw.length / PAGE_SIZE)} page(s)`)
+  console.log(`[paginate] Done: ${allRaw.length} raw transactions fetched`)
   return allRaw
 }
 

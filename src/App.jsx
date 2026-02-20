@@ -6,6 +6,7 @@ import SpeechBubble from './components/SpeechBubble'
 import WalletConnect from './components/WalletConnect'
 import ThemeToggle from './components/ThemeToggle'
 import WalletInfoPanel from './components/WalletInfoPanel'
+import JournalPanel from './components/JournalPanel'
 import { getWalletActivity } from './utils/walletService'
 import './styles/animations.css'
 
@@ -26,11 +27,14 @@ function ensureYomoStorageVersion() {
     'yomo_emotion',
     'connectedViaPhantom',
     'yomo_theme',
+    'yomo_name',
+    'user_name',
+    // yomo_journal is intentionally excluded — notes persist across resets
   ]
   const keysToRemove = [...knownKeys]
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
-    if (key && key.includes('yomo') && !keysToRemove.includes(key)) keysToRemove.push(key)
+    if (key && key.includes('yomo') && key !== 'yomo_journal' && !keysToRemove.includes(key)) keysToRemove.push(key)
   }
   keysToRemove.forEach((k) => localStorage.removeItem(k))
   localStorage.setItem('yomo_version', YOMO_VERSION)
@@ -509,6 +513,16 @@ function App() {
       setShowWelcomeBackOnMain(false)
     } else {
       console.log('⏭️ Skipping onboarding (Phantom-connected, already completed)')
+      // Restore wallet + variant from storage so the main app has them immediately
+      const storedWallet = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address')
+      const storedVariant = localStorage.getItem('selectedVariant') || localStorage.getItem('yomo_variant')
+      if (storedWallet) {
+        setDisplayedWallet(storedWallet)
+        saveQuickSession(storedWallet)   // extend quick-session so next load is also fast
+      }
+      if (storedVariant && ['dawn', 'sage', 'twilight'].includes(storedVariant)) {
+        setVariant(storedVariant)
+      }
       setShowOnboarding(false)
       setShowWelcomeBackOnMain(true)
     }
@@ -547,6 +561,31 @@ function App() {
   }, [])
 
   const handleGoBack = useCallback(() => {
+    clearQuickSession()
+    resetSession()
+    processedTxKeysRef.current = new Set()
+    setDisplayedWallet('')
+    setWalletTransactions([])
+    setHeliusReactionBubble(null)
+    setShowOnboarding(true)
+  }, [resetSession])
+
+  /** Full disconnect — clears claimed state so the user must re-connect Phantom. */
+  const handleDisconnect = useCallback(() => {
+    const keysToRemove = [
+      'connectedViaPhantom',
+      'hasCompletedOnboarding',
+      'yomo_onboarding_completed',
+      'selectedVariant',
+      'yomo_variant',
+      'walletAddress',
+      'yomo_wallet_address',
+      'yomo_emotion',
+      'yomo_name',
+      'user_name',
+      'yomo_quick_session',
+    ]
+    keysToRemove.forEach((k) => localStorage.removeItem(k))
     clearQuickSession()
     resetSession()
     processedTxKeysRef.current = new Set()
@@ -599,15 +638,31 @@ function App() {
 
   const showMainApp = !isLoading && !showOnboarding
 
-  // Claimed = user connected their own wallet via Phantom during onboarding
+  // isClaimed  — the local user has a Phantom-connected wallet stored
+  // isViewingOwnWallet — badge shows green only when viewing that exact wallet
   const isClaimed = localStorage.getItem('connectedViaPhantom') === 'true'
+  const ownWalletAddress = localStorage.getItem('walletAddress') || localStorage.getItem('yomo_wallet_address') || ''
+  const isViewingOwnWallet = isClaimed && !!ownWalletAddress && displayedWallet === ownWalletAddress
 
   return (
     <div className={`min-h-screen ${backgroundStyle} text-accent relative overflow-hidden transition-colors duration-300`}>
 
-      {/* Theme toggle — top right (view-only, no wallet connect) */}
+      {/* Top-right controls: Disconnect (claimed only) + theme toggle */}
       {!isLoading && (
-        <div className="fixed top-4 right-4 z-[60]">
+        <div className="fixed top-4 right-4 z-[60] flex items-center gap-2">
+          {showMainApp && isClaimed && (
+            <button
+              type="button"
+              onClick={handleDisconnect}
+              className={`px-3 py-1.5 rounded-full font-mono text-xs border transition-opacity hover:opacity-70 ${
+                theme === 'day'
+                  ? 'text-gray-500 border-gray-300 bg-black/5'
+                  : 'text-white/50 border-white/20 bg-white/8'
+              }`}
+            >
+              Disconnect
+            </button>
+          )}
           <ThemeToggle onThemeChange={handleThemeChange} theme={theme} />
         </div>
       )}
@@ -655,7 +710,7 @@ function App() {
               onAddressChange={handleWalletAddressChange}
             />
 
-            {/* Right: Yomo + wallet label + session tracker */}
+            {/* Centre: Yomo + wallet label + session tracker */}
             <div className="flex flex-col items-center">
 
               {/* Wallet address label + claim badge inline above Yomo */}
@@ -671,7 +726,7 @@ function App() {
                   <div className="relative group flex-shrink-0">
                     <div
                       className={`w-2.5 h-2.5 rounded-full cursor-default ${
-                        isClaimed
+                        isViewingOwnWallet
                           ? 'bg-green-500 claim-glow'
                           : 'bg-transparent border-2 border-gray-400/60 unclaim-pulse'
                       }`}
@@ -684,7 +739,7 @@ function App() {
                           : 'bg-black/80 text-white/90 border border-white/20 backdrop-blur-md'
                       }`}
                     >
-                      {isClaimed
+                      {isViewingOwnWallet
                         ? `Claimed by ${truncateWallet(displayedWallet)}`
                         : 'This Yomo is unclaimed — connect your wallet to claim it'}
                       {/* Arrow pointing down toward the dot */}
@@ -769,6 +824,11 @@ function App() {
               </div>
 
             </div>
+
+            {/* Right: journal panel — claimed wallets only */}
+            {isClaimed && (
+              <JournalPanel theme={theme} />
+            )}
           </div>
         )}
       </div>
