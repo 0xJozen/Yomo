@@ -46,11 +46,147 @@ const variantColors = {
   twilight: '#5a6a8f'
 }
 
+// Defined outside the component so it is never recreated on re-renders.
+// Any re-render that reads `scale` state will call this at most once per resize event.
+function getScale() {
+  if (typeof window === 'undefined') return 1
+  const width = window.innerWidth
+  if (width <= 700) return 0.875
+  if (width <= 1200) return 0.875 + ((width - 700) / 500) * 0.125
+  return 1.0
+}
+
 const EMOTION_REACTIONS = {
   happy: 'your portfolio is looking good! 📈',
   sad: 'rough patch lately... 📉',
   sleepy: "you've been quiet lately 😴",
   neutral: 'watching the markets... 👀'
+}
+
+const truncateWallet = (addr) => {
+  if (!addr || addr.length < 10) return addr || ''
+  return `${addr.slice(0, 4)}...${addr.slice(-4)}`
+}
+
+function formatElapsed(seconds) {
+  if (seconds <= 0) return '0m'
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
+function formatSessionPnl(pnl) {
+  if (pnl === 0) return '0.0000 SOL'
+  const sign = pnl > 0 ? '+' : ''
+  return `${sign}${pnl.toFixed(4)} SOL`
+}
+
+// How long without any transaction before a session is considered over
+const SESSION_INACTIVITY_SEC = 4 * 3600 // 4 hours
+
+// Polling interval — defined outside the component so it is never recreated
+const POLL_INTERVAL_MS = 10_000 // 10 seconds
+
+// ── Quick-session persistence ─────────────────────────────────────────────────
+// If the user returns within 15 minutes we skip the landing screen entirely.
+const QUICK_SESSION_EXPIRY_MS = 15 * 60 * 1000 // 15 minutes
+
+function saveQuickSession(walletAddress) {
+  if (!walletAddress) return
+  try {
+    localStorage.setItem('yomo_quick_session', JSON.stringify({ wallet: walletAddress, ts: Date.now() }))
+  } catch { /* storage full / private mode */ }
+}
+
+function loadQuickSession() {
+  try {
+    const raw = localStorage.getItem('yomo_quick_session')
+    if (!raw) return null
+    const { wallet, ts } = JSON.parse(raw)
+    if (!wallet || typeof ts !== 'number') return null
+    if (Date.now() - ts > QUICK_SESSION_EXPIRY_MS) {
+      localStorage.removeItem('yomo_quick_session')
+      return null
+    }
+    return wallet
+  } catch {
+    return null
+  }
+}
+
+function clearQuickSession() {
+  localStorage.removeItem('yomo_quick_session')
+}
+
+/**
+ * Given transactions (most-recent-first, dust already filtered), detect whether
+ * there is an ongoing trading session and compute its start time + running PnL.
+ *
+ * A session is "active" when the most recent tx is within SESSION_INACTIVITY_SEC
+ * of now. We walk backwards until we hit a gap larger than SESSION_INACTIVITY_SEC
+ * between two consecutive txs — everything on the recent side of that gap belongs
+ * to the current session. PnL is replayed with the same swap-in / swap-out logic
+ * used by the live polling path.
+ */
+function detectActiveSession(transactions) {
+  if (!transactions.length) {
+    console.log('[Session detect] No transactions to evaluate')
+    return { active: false }
+  }
+
+  const now = Math.floor(Date.now() / 1000)
+
+  // Explicitly sort descending so the algorithm is correct regardless of API order
+  const sorted = [...transactions].sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+
+  console.log(`[Session detect] Evaluating ${sorted.length} txs (inactivity threshold: ${SESSION_INACTIVITY_SEC / 3600}h)`)
+  sorted.forEach((tx, i) => {
+    const minsAgo = tx.timestamp ? Math.round((now - tx.timestamp) / 60) : '?'
+    const gapMin  = i > 0 && sorted[i - 1].timestamp && tx.timestamp
+      ? Math.round((sorted[i - 1].timestamp - tx.timestamp) / 60)
+      : null
+    console.log(
+      `[Session detect]  [${i}] ts=${tx.timestamp} | ${minsAgo}m ago` +
+      (gapMin !== null ? ` | gap from prev: ${gapMin}m` : ' | (most recent)') +
+      ` | solChange=${(tx.solChange ?? 0).toFixed(4)}`
+    )
+  })
+
+  const mostRecent = sorted[0]
+  if (!mostRecent.timestamp || (now - mostRecent.timestamp) > SESSION_INACTIVITY_SEC) {
+    const lag = mostRecent.timestamp ? `${Math.round((now - mostRecent.timestamp) / 60)}m ago` : 'missing timestamp'
+    console.log(`[Session detect] ✗ No active session — most recent tx is ${lag} (threshold: ${SESSION_INACTIVITY_SEC / 60}m)`)
+    return { active: false }
+  }
+
+  // Walk from most-recent toward oldest, extending the chain while the gap
+  // between adjacent transactions stays within the inactivity threshold.
+  const sessionTxs = [mostRecent]
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = (sorted[i - 1].timestamp ?? 0) - (sorted[i].timestamp ?? 0)
+    if (gap > SESSION_INACTIVITY_SEC) {
+      console.log(`[Session detect] ✗ Chain breaks at [${i}]: gap ${Math.round(gap / 60)}m > ${SESSION_INACTIVITY_SEC / 60}m limit`)
+      break
+    }
+    sessionTxs.push(sorted[i])
+  }
+
+  // Oldest tx in the chain = session start
+  const sessionStartTs = sessionTxs[sessionTxs.length - 1].timestamp
+  const lastActivityTs  = mostRecent.timestamp
+
+  // Session PnL = net cumulative SOL change across every trade in the chain
+  const cumulativePnl = sessionTxs.reduce((sum, tx) => sum + (tx.solChange ?? 0), 0)
+
+  console.log('[Session detect] ✓ Active session:', {
+    txCount:    sessionTxs.length,
+    startTs:    sessionStartTs,
+    elapsedMin: Math.round((now - sessionStartTs) / 60),
+    pnl:        cumulativePnl.toFixed(4),
+  })
+
+  return { active: true, sessionStartTs, lastActivityTs, cumulativePnl }
 }
 
 function App() {
@@ -82,7 +218,8 @@ function App() {
       console.log('🧹 Clearing onboarding localStorage...')
       const knownKeys = [
         'hasCompletedOnboarding', 'yomo_onboarding_completed', 'selectedVariant', 'yomo_variant',
-        'walletAddress', 'yomo_wallet_address', 'isPublic', 'yomo_emotion', 'connectedViaPhantom'
+        'walletAddress', 'yomo_wallet_address', 'isPublic', 'yomo_emotion', 'connectedViaPhantom',
+        'yomo_quick_session'
       ]
       knownKeys.forEach((k) => localStorage.removeItem(k))
       // Keep yomo_version so next load doesn't re-clear
@@ -114,6 +251,8 @@ function App() {
   const [showWelcomeBackOnMain, setShowWelcomeBackOnMain] = useState(false)
   const [displayedWallet, setDisplayedWallet] = useState('')
   const [walletTransactions, setWalletTransactions] = useState([])
+  const [showStats, setShowStats] = useState(true)
+  const [sessionDisplay, setSessionDisplay] = useState({ active: false, elapsed: 0, pnl: 0 })
   const hasShownWelcomeBack = useRef(false)
   // Only run when we transition to main app (both false). Don't depend on showWelcomeBackOnMain to avoid extra runs.
   useEffect(() => {
@@ -141,8 +280,6 @@ function App() {
   const heliusReactionTimeoutRef = useRef(null)
 
   // Session-based emotion: swap-in starts session, swap-out realizes PnL, 4h inactivity resets
-  const POLL_INTERVAL_MS = 10000
-  const SESSION_INACTIVITY_SEC = 4 * 3600
   const processedTxKeysRef = useRef(new Set())
   const sessionStartTsRef = useRef(0)
   const lastActivityTsRef = useRef(0)
@@ -164,70 +301,112 @@ function App() {
     localStorage.setItem('yomo_emotion', pnl > 0 ? 'happy' : pnl < 0 ? 'sad' : 'neutral')
   }, [])
 
+  // 1-second ticker: keeps sessionDisplay in sync with refs without causing extra re-renders in the heavy logic
+  useEffect(() => {
+    const tick = () => {
+      const start = sessionStartTsRef.current
+      const now = Math.floor(Date.now() / 1000)
+      if (start === 0) {
+        setSessionDisplay((prev) => prev.active ? { active: false, elapsed: 0, pnl: 0 } : prev)
+      } else {
+        const elapsed = now - start
+        const pnl = sessionCumulativePnlRef.current
+        setSessionDisplay((prev) =>
+          prev.active && prev.elapsed === elapsed && prev.pnl === pnl
+            ? prev
+            : { active: true, elapsed, pnl }
+        )
+      }
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [])
+
   const processWalletResult = useCallback((result, isInitial = false) => {
-    setWalletTransactions(result.transactions || [])
-    const txs = result.transactions || []
+    // All filtered transactions — used for full session detection
+    const allTxs = result.transactions || []
+    // Panel only shows the 20 most recent trades (session detection is separate)
+    setWalletTransactions(allTxs.slice(0, 20))
+    const txs = allTxs
     const now = Math.floor(Date.now() / 1000)
 
     if (isInitial) {
       processedTxKeysRef.current = new Set(
         txs.map((tx, i) => tx.signature || `${tx.timestamp}-${tx.solChange}-${i}`)
       )
-      const emotion = result.emotion || 'neutral'
-      setEmotion(emotion)
-      localStorage.setItem('yomo_emotion', emotion)
-      setHeliusReactionBubble({ text: EMOTION_REACTIONS[emotion] ?? EMOTION_REACTIONS.neutral })
+
+      // Detect if there is already an active session from the fetched history
+      const session = detectActiveSession(txs)
+      if (session.active) {
+        sessionStartTsRef.current = session.sessionStartTs
+        lastActivityTsRef.current = session.lastActivityTs
+        sessionCumulativePnlRef.current = session.cumulativePnl
+        // Emotion reflects session PnL rather than raw 24h solChange
+        const sessionEmotion = session.cumulativePnl > 0 ? 'happy' : session.cumulativePnl < 0 ? 'sad' : 'neutral'
+        setEmotion(sessionEmotion)
+        localStorage.setItem('yomo_emotion', sessionEmotion)
+        setHeliusReactionBubble({ text: EMOTION_REACTIONS[sessionEmotion] ?? EMOTION_REACTIONS.neutral })
+      } else {
+        const emotion = result.emotion || 'neutral'
+        setEmotion(emotion)
+        localStorage.setItem('yomo_emotion', emotion)
+        setHeliusReactionBubble({ text: EMOTION_REACTIONS[emotion] ?? EMOTION_REACTIONS.neutral })
+      }
+
       if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
       heliusReactionTimeoutRef.current = setTimeout(() => setHeliusReactionBubble(null), 4000)
       return
     }
 
-    // Poll: only process new txs
-    let showedBubble = false
+    // Poll: scan for new txs and accumulate into the session
+    // Track only the latest new trade so we show one bubble, not one per tx.
+    let latestNewSolChange = null
     for (let i = 0; i < txs.length; i++) {
       const tx = txs[i]
       const key = tx.signature || `${tx.timestamp}-${tx.solChange}-${i}`
       if (processedTxKeysRef.current.has(key)) continue
       processedTxKeysRef.current.add(key)
 
-      lastActivityTsRef.current = tx.timestamp || now
-
       const solChange = tx.solChange ?? 0
-      if (solChange > 0) {
-        if (sessionStartTsRef.current === 0) {
-          sessionStartTsRef.current = now
-          lastActivityTsRef.current = tx.timestamp || now
-        }
-        lastEntrySolRef.current += solChange
-      } else if (solChange < 0) {
-        const realizedPnl = lastEntrySolRef.current + solChange
-        lastEntrySolRef.current = Math.max(0, lastEntrySolRef.current + solChange)
-        sessionCumulativePnlRef.current += realizedPnl
+      if (solChange === 0) continue
 
-        const gain = Math.abs(realizedPnl)
-        const gainStr = gain >= 0.0001 ? gain.toFixed(4) : gain.toExponential(2)
-        if (realizedPnl > 0) {
-          setEmotion('happy')
-          setHeliusReactionBubble({ text: `+${gainStr} SOL! 📈` })
-        } else {
-          setEmotion('sad')
-          setHeliusReactionBubble({ text: `-${gainStr} SOL 📉` })
-        }
-        showedBubble = true
-        if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
-        heliusReactionTimeoutRef.current = setTimeout(() => {
-          setHeliusReactionBubble(null)
-          applySessionEmotion()
-        }, 4000)
-      }
+      lastActivityTsRef.current = tx.timestamp || now
+      // Start session timestamp on the first new trade
+      if (sessionStartTsRef.current === 0) sessionStartTsRef.current = tx.timestamp || now
+
+      // Simple cumulative SOL change — consistent with detectActiveSession
+      sessionCumulativePnlRef.current += solChange
+      latestNewSolChange = solChange
     }
-    // Only apply session emotion if a trading session has actually started.
-    // Before the first swap-in, sessionStartTsRef is 0 — don't overwrite the
-    // initial emotion that was set from the Helius activity result.
-    if (!showedBubble && sessionStartTsRef.current !== 0) applySessionEmotion()
-  }, [applySessionEmotion, resetSession])
 
-  // Initial fetch when displayedWallet is set
+    if (latestNewSolChange !== null) {
+      const gain = Math.abs(latestNewSolChange)
+      const gainStr = gain >= 0.0001 ? gain.toFixed(4) : gain.toExponential(2)
+      if (latestNewSolChange > 0) {
+        setEmotion('happy')
+        setHeliusReactionBubble({ text: `+${gainStr} SOL! 📈` })
+      } else {
+        setEmotion('sad')
+        setHeliusReactionBubble({ text: `-${gainStr} SOL 📉` })
+      }
+      if (heliusReactionTimeoutRef.current) clearTimeout(heliusReactionTimeoutRef.current)
+      heliusReactionTimeoutRef.current = setTimeout(() => {
+        setHeliusReactionBubble(null)
+        applySessionEmotion()
+      }, 4000)
+    } else if (sessionStartTsRef.current !== 0) {
+      applySessionEmotion()
+    }
+  }, [applySessionEmotion])
+
+  // Stable ref so the fetch/poll effects never re-run just because the callback identity
+  // changed. processWalletResult is already memoised, but keeping it out of the dep arrays
+  // removes the last possible source of spurious re-runs.
+  const processWalletResultRef = useRef(processWalletResult)
+  processWalletResultRef.current = processWalletResult
+
+  // Initial fetch when displayedWallet becomes available
   useEffect(() => {
     if (isLoading || showOnboarding || !displayedWallet) return
     let cancelled = false
@@ -239,7 +418,7 @@ function App() {
         solChange: result.solChange,
         emotion: result.emotion
       })
-      processWalletResult(result, true)
+      processWalletResultRef.current(result, true)
     })
     return () => {
       cancelled = true
@@ -248,27 +427,27 @@ function App() {
         heliusReactionTimeoutRef.current = null
       }
     }
-  }, [isLoading, showOnboarding, displayedWallet, processWalletResult])
+  }, [isLoading, showOnboarding, displayedWallet])
 
   // 10s polling: refetch and process new txs for session-based emotion
   useEffect(() => {
     if (isLoading || showOnboarding || !displayedWallet) return
     const interval = setInterval(() => {
       getWalletActivity(displayedWallet).then((result) => {
-        setWalletTransactions(result.transactions || [])
         const now = Math.floor(Date.now() / 1000)
         if (sessionStartTsRef.current !== 0 && now - lastActivityTsRef.current > SESSION_INACTIVITY_SEC) {
           resetSession()
         }
-        processWalletResult(result, false)
+        processWalletResultRef.current(result, false)
       })
     }, POLL_INTERVAL_MS)
     return () => clearInterval(interval)
-  }, [isLoading, showOnboarding, displayedWallet, processWalletResult, resetSession])
+  }, [isLoading, showOnboarding, displayedWallet, resetSession])
 
   const handleWalletAddressChange = useCallback((newAddress) => {
     localStorage.setItem('walletAddress', newAddress)
     localStorage.setItem('yomo_wallet_address', newAddress)
+    saveQuickSession(newAddress)
     processedTxKeysRef.current = new Set()
     resetSession()
     setDisplayedWallet(newAddress)
@@ -284,7 +463,8 @@ function App() {
         console.log('🔄 Reset triggered - clearing onboarding and reloading')
         const knownKeys = [
           'hasCompletedOnboarding', 'yomo_onboarding_completed', 'selectedVariant', 'yomo_variant',
-          'walletAddress', 'yomo_wallet_address', 'isPublic', 'yomo_emotion', 'connectedViaPhantom'
+          'walletAddress', 'yomo_wallet_address', 'isPublic', 'yomo_emotion', 'connectedViaPhantom',
+          'yomo_quick_session'
         ]
         knownKeys.forEach((k) => localStorage.removeItem(k))
         window.location.reload()
@@ -298,6 +478,16 @@ function App() {
   const handleLoadingComplete = useCallback(() => {
     console.log('⏱️ Loading screen completed')
     setIsLoading(false)
+
+    // Quick-session restore: if the user was here less than 15 minutes ago,
+    // skip the landing screen and go straight to the main app.
+    const quickWallet = loadQuickSession()
+    if (quickWallet) {
+      console.log('⚡ Quick session restored:', quickWallet.slice(0, 8) + '...')
+      setDisplayedWallet(quickWallet)
+      setShowOnboarding(false)
+      return
+    }
 
     // Only skip onboarding when the user actually connected via Phantom.
     // A pasted/viewed address does NOT count — those users always see the landing
@@ -349,42 +539,32 @@ function App() {
     setVariant(selectedVariant)
     setEmotion(initialEmotion)
     setShowOnboarding(false)
-    if (walletAddress) setDisplayedWallet(walletAddress)
+    if (walletAddress) {
+      setDisplayedWallet(walletAddress)
+      saveQuickSession(walletAddress)
+    }
     console.log('🏁 Onboarding hidden, showing main app')
   }, [])
+
+  const handleGoBack = useCallback(() => {
+    clearQuickSession()
+    resetSession()
+    processedTxKeysRef.current = new Set()
+    setDisplayedWallet('')
+    setWalletTransactions([])
+    setHeliusReactionBubble(null)
+    setShowOnboarding(true)
+  }, [resetSession])
 
   const handleThemeChange = useCallback((newTheme) => {
     setTheme(newTheme)
   }, [])
 
-  // Calculate responsive scale based on viewport width
-  // Target: good from 700px to 1920px width
-  // Scale factor: 0.875 at 700px, 1.0 at 1200px, 1.0 at 1920px (capped)
-  const getScale = () => {
-    if (typeof window === 'undefined') return 1
-    
-    const width = window.innerWidth
-    if (width <= 700) {
-      return 0.875 // Scale down for small screens
-    } else if (width <= 1200) {
-      // Linear interpolation between 700px (0.875) and 1200px (1.0)
-      return 0.875 + ((width - 700) / (1200 - 700)) * (1.0 - 0.875)
-    } else {
-      return 1.0 // Full size for larger screens
-    }
-  }
-
-  // Responsive scaling state
-  const [scale, setScale] = useState(() => {
-    if (typeof window === 'undefined') return 1
-    return getScale()
-  })
+  // Responsive scaling state — getScale() is defined at module level (stable reference)
+  const [scale, setScale] = useState(getScale)
 
   useEffect(() => {
-    const handleResize = () => {
-      setScale(getScale())
-    }
-    
+    const handleResize = () => setScale(getScale())
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
   }, [])
@@ -417,51 +597,107 @@ function App() {
     console.log('🏠 Rendering: Main App')
   }
 
+  const showMainApp = !isLoading && !showOnboarding
+
+  // Claimed = user connected their own wallet via Phantom during onboarding
+  const isClaimed = localStorage.getItem('connectedViaPhantom') === 'true'
+
   return (
-    <div className={`min-h-screen ${backgroundStyle} text-accent flex flex-col items-center justify-center relative overflow-hidden transition-colors duration-300`}>
-      {/* Theme toggle and wallet button - fixed at top right, outside scaling wrapper */}
+    <div className={`min-h-screen ${backgroundStyle} text-accent relative overflow-hidden transition-colors duration-300`}>
+
+      {/* Theme toggle — top right (view-only, no wallet connect) */}
       {!isLoading && (
-        <div className="fixed top-4 right-4 z-[60] flex items-center gap-3">
+        <div className="fixed top-4 right-4 z-[60]">
           <ThemeToggle onThemeChange={handleThemeChange} theme={theme} />
-          {!showOnboarding && <WalletConnect theme={theme} />}
         </div>
       )}
-      
-      {/* Responsive scaling wrapper */}
-      <div 
-        className="w-full h-full flex items-center justify-center"
-        style={{
-          transform: `scale(${scale})`,
-          transformOrigin: 'center center',
-          maxWidth: '1920px',
-          margin: '0 auto'
-        }}
-      >
-        
+
+      {/* Back button — top left (main app only) */}
+      {showMainApp && (
+        <button
+          type="button"
+          onClick={handleGoBack}
+          aria-label="Back to landing screen"
+          className={`fixed top-4 left-4 z-[60] w-8 h-8 flex items-center justify-center rounded-full transition-opacity hover:opacity-70 ${
+            theme === 'day' ? 'text-gray-500 bg-black/8' : 'text-white/50 bg-white/10'
+          }`}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+        </button>
+      )}
+
+      {/* ── Content ────────────────────────────────────────────────────────────
+          Loading and Onboarding: centred full-screen.
+          Main app: WalletInfoPanel + Yomo sit side by side in a flex row, both
+          scaled together so they stay proportional and centred as a unit.
+      ─────────────────────────────────────────────────────────────────────── */}
+      <div className="fixed inset-0 flex items-center justify-center overflow-hidden">
         {isLoading ? (
-          <LoadingScreen 
+          <LoadingScreen
             onComplete={handleLoadingComplete}
             variantColor={variantColors[variant]}
           />
         ) : showOnboarding ? (
           <Onboarding onComplete={handleOnboardingComplete} theme={theme} />
         ) : (
-          <>
-            {/* Wallet info panel — absolutely positioned left side, does not affect Yomo centering */}
-            <div
-              className="absolute z-20"
-              style={{ left: '5rem', top: '50%', transform: 'translateY(-50%)' }}
-            >
-              <WalletInfoPanel
-                theme={theme}
-                walletAddress={displayedWallet}
-                transactions={walletTransactions}
-                onAddressChange={handleWalletAddressChange}
-              />
-            </div>
+          /* Panel + Yomo side by side, scaled as one unit */
+          <div
+            className="flex items-center gap-8"
+            style={{ transform: `scale(${scale})`, transformOrigin: 'center center' }}
+          >
+            {/* Left: wallet info panel */}
+            <WalletInfoPanel
+              theme={theme}
+              walletAddress={displayedWallet}
+              transactions={walletTransactions}
+              onAddressChange={handleWalletAddressChange}
+            />
 
-            {/* Yomo — full-width full-height centered */}
-            <div className="flex flex-col items-center justify-center w-full h-full">
+            {/* Right: Yomo + wallet label + session tracker */}
+            <div className="flex flex-col items-center">
+
+              {/* Wallet address label + claim badge inline above Yomo */}
+              {displayedWallet && (
+                <div
+                  className={`mb-3 px-3 py-1 rounded-full font-mono text-xs tracking-wide select-none transition-colors duration-300 flex items-center gap-2 ${
+                    theme === 'day' ? 'bg-black/8 text-gray-600' : 'bg-white/10 text-white/60'
+                  }`}
+                >
+                  <span>{truncateWallet(displayedWallet)}</span>
+
+                  {/* Claimed / unclaimed badge dot */}
+                  <div className="relative group flex-shrink-0">
+                    <div
+                      className={`w-2.5 h-2.5 rounded-full cursor-default ${
+                        isClaimed
+                          ? 'bg-green-500 claim-glow'
+                          : 'bg-transparent border-2 border-gray-400/60 unclaim-pulse'
+                      }`}
+                    />
+                    {/* Tooltip — anchored right, appears above dot */}
+                    <div
+                      className={`absolute bottom-full right-0 mb-2 px-2.5 py-1.5 rounded-lg text-[11px] font-mono leading-snug min-w-[200px] opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-30 ${
+                        theme === 'day'
+                          ? 'bg-gray-800 text-white shadow-lg'
+                          : 'bg-black/80 text-white/90 border border-white/20 backdrop-blur-md'
+                      }`}
+                    >
+                      {isClaimed
+                        ? `Claimed by ${truncateWallet(displayedWallet)}`
+                        : 'This Yomo is unclaimed — connect your wallet to claim it'}
+                      {/* Arrow pointing down toward the dot */}
+                      <div
+                        className={`absolute top-full right-2.5 border-4 border-transparent ${
+                          theme === 'day' ? 'border-t-gray-800' : 'border-t-black/80'
+                        }`}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="relative flex items-center justify-center">
                 <Yomo
                   emotion={showWelcomeBack ? 'happy' : emotion}
@@ -474,9 +710,66 @@ function App() {
                 {heliusReactionBubble && (
                   <SpeechBubble text={heliusReactionBubble.text} isVisible={true} />
                 )}
+
               </div>
+
+              {/* Session tracker below Yomo */}
+              <div className="mt-4 flex items-center gap-2">
+                {showStats && (
+                  <div
+                    className={`px-3 py-1.5 rounded-full font-mono text-xs transition-colors duration-300 ${
+                      theme === 'day' ? 'bg-black/8 text-gray-600' : 'bg-white/10 text-white/60'
+                    }`}
+                  >
+                    {sessionDisplay.active ? (
+                      <span>
+                        <span className={theme === 'day' ? 'text-gray-400' : 'text-white/40'}>Session: </span>
+                        <span>{formatElapsed(sessionDisplay.elapsed)}</span>
+                        <span className={theme === 'day' ? 'text-gray-400' : 'text-white/40'}> · </span>
+                        <span
+                          className={
+                            sessionDisplay.pnl > 0
+                              ? 'text-green-500'
+                              : sessionDisplay.pnl < 0
+                              ? 'text-red-400'
+                              : theme === 'day' ? 'text-gray-500' : 'text-white/50'
+                          }
+                        >
+                          {formatSessionPnl(sessionDisplay.pnl)}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className={theme === 'day' ? 'text-gray-400' : 'text-white/35'}>
+                        No active session
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Show/hide toggle */}
+                <button
+                  type="button"
+                  onClick={() => setShowStats((v) => !v)}
+                  aria-label={showStats ? 'Hide session stats' : 'Show session stats'}
+                  className={`w-5 h-5 flex items-center justify-center rounded-full transition-opacity hover:opacity-80 ${
+                    theme === 'day' ? 'text-gray-400' : 'text-white/35'
+                  }`}
+                >
+                  {showStats ? (
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                    </svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+
             </div>
-          </>
+          </div>
         )}
       </div>
     </div>

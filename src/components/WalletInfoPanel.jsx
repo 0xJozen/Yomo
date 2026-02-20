@@ -17,18 +17,38 @@ function formatTimeAgo(timestamp) {
   return `${Math.floor(diff / 604800)}w ago`
 }
 
-function formatSolChange(solChange) {
+function formatSolAbs(solChange) {
+  return Math.abs(solChange).toFixed(4)
+}
+
+function formatSolSigned(solChange) {
   if (solChange === 0) return '0'
   const fixed = Math.abs(solChange).toFixed(4)
   return solChange > 0 ? `+${fixed}` : `-${fixed}`
 }
 
-/** Format a USD price (from Jupiter). Shows enough precision to be useful for micro-cap tokens. */
-function formatPrice(value) {
+function formatPnlPct(pct) {
+  const sign = pct >= 0 ? '+' : ''
+  return `(${sign}${pct.toFixed(0)}%)`
+}
+
+/** Truncate token symbol to maxLen chars with a trailing ellipsis if needed. */
+function truncateToken(name, maxLen = 6) {
+  if (!name) return 'SOL'
+  return name.length > maxLen ? `${name.slice(0, maxLen)}…` : name
+}
+
+/**
+ * Format a market cap (or fallback price) value from DexScreener.
+ * Large values are shown as $X.XM / $X.XB; small values (price fallback) get
+ * enough decimal places to be meaningful.
+ */
+function formatMktCap(value) {
   if (value == null || value <= 0) return '—'
+  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`
   if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`
   if (value >= 1e3) return `$${(value / 1e3).toFixed(1)}k`
-  if (value >= 1) return `$${value.toFixed(2)}`
+  if (value >= 1)   return `$${value.toFixed(2)}`
   if (value >= 0.01) return `$${value.toFixed(4)}`
   if (value >= 0.0001) return `$${value.toFixed(6)}`
   return `<$0.0001`
@@ -38,6 +58,7 @@ const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressCha
   const [isEditing, setIsEditing] = useState(false)
   const [inputValue, setInputValue] = useState('')
   const [error, setError] = useState('')
+  const [isMinimized, setIsMinimized] = useState(false)
   const inputRef = useRef(null)
 
   const isDay = theme === 'day'
@@ -48,6 +69,10 @@ const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressCha
     ? 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'
     : 'bg-white/15 border-white/30 text-white placeholder-white/50'
   const labelClass = isDay ? 'text-gray-600 font-mono text-xs' : 'text-white/70 font-mono text-xs'
+  // Solid opaque colour for sticky header cells — must exactly cover scrolling body rows.
+  // Day panel is white/90 over a light background → #f5f5f5 is visually indistinguishable.
+  // Night panel is white/10 over the deep-indigo gradient → #181c2e approximates the result.
+  const stickyBg = isDay ? '#f5f5f5' : '#181c2e'
   const rowClass = isDay ? 'border-gray-200' : 'border-white/15'
 
   useEffect(() => {
@@ -89,80 +114,192 @@ const WalletInfoPanel = ({ theme, walletAddress, transactions = [], onAddressCha
   }
 
   return (
-    <div className={`rounded-xl p-4 pr-3 w-[380px] overflow-hidden ${panelClass}`}>
-      <div className="mb-3">
-        <div className={labelClass}>Wallet</div>
-        {isEditing ? (
-          <div className="mt-1 space-y-1">
-            <input
-              ref={inputRef}
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Paste Solana address..."
-              className={`w-full px-3 py-2 rounded-lg font-mono text-sm border-2 focus:outline-none focus:border-accent ${inputClass}`}
-              aria-label="Wallet address"
-            />
-            {error && <p className="font-mono text-xs text-red-400">{error}</p>}
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={handleStartEdit}
-            className="mt-1 flex items-center gap-1.5 font-mono text-sm hover:opacity-80 transition-opacity"
-          >
-            <span>{truncateAddress(walletAddress) || 'No address'}</span>
-            <svg className="w-3.5 h-3.5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+    <div className={`rounded-xl p-4 w-[460px] overflow-hidden ${panelClass}`}>
+
+      {/* ── Header: wallet label + address + minimize toggle ── */}
+      <div className="flex items-start justify-between mb-1">
+        <div className="flex-1 min-w-0">
+          <div className={labelClass}>Wallet</div>
+          {isEditing ? (
+            <div className="mt-1 space-y-1">
+              <input
+                ref={inputRef}
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Paste Solana address..."
+                className={`w-full px-3 py-2 rounded-lg font-mono text-sm border-2 focus:outline-none focus:border-accent ${inputClass}`}
+                aria-label="Wallet address"
+              />
+              {error && <p className="font-mono text-xs text-red-400">{error}</p>}
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleStartEdit}
+              className="mt-1 flex items-center gap-1.5 font-mono text-sm hover:opacity-80 transition-opacity"
+            >
+              <span>{truncateAddress(walletAddress) || 'No address'}</span>
+              <svg className="w-3.5 h-3.5 opacity-70 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {/* Minimize / expand toggle */}
+        <button
+          type="button"
+          onClick={() => setIsMinimized((v) => !v)}
+          aria-label={isMinimized ? 'Expand panel' : 'Minimize panel'}
+          className={`ml-2 mt-0.5 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded transition-opacity hover:opacity-70 ${isDay ? 'text-gray-500' : 'text-white/60'}`}
+        >
+          {isMinimized ? (
+            /* Plus sign */
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
             </svg>
-          </button>
-        )}
+          ) : (
+            /* Minus sign */
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 12h16" />
+            </svg>
+          )}
+        </button>
       </div>
 
-      <div className={labelClass}>Recent transactions</div>
-      <div className="mt-2 max-h-[240px] overflow-y-auto overflow-x-hidden pr-1">
-        {transactions.length === 0 ? (
-          <p className={`py-2 font-mono text-xs ${isDay ? 'text-gray-500' : 'text-white/50'}`}>
-            No recent transactions
-          </p>
-        ) : (
-          <table className="w-full table-fixed font-mono text-xs border-collapse">
-            <colgroup>
-              <col style={{ width: '60px' }} />
-              <col style={{ width: '104px' }} />
-              <col style={{ width: '72px' }} />
-              <col style={{ width: '68px' }} />
-            </colgroup>
-            <thead>
-              <tr className={`${isDay ? 'text-gray-500' : 'text-white/50'} text-left sticky top-0 ${isDay ? 'bg-white/90' : 'bg-black/20'}`}>
-                <th className="py-1.5 pr-1.5 font-medium">Token</th>
-                <th className="py-1.5 pr-1.5 font-medium text-right">Amount</th>
-                <th className="py-1.5 pr-1.5 font-medium text-right">Price</th>
-                <th className="py-1.5 font-medium text-right">Time</th>
-              </tr>
-            </thead>
-            <tbody>
-              {transactions.map((tx, i) => (
-                <tr
-                  key={tx.signature ? tx.signature : `${tx.timestamp}-${tx.solChange}-${i}`}
-                  className={`border-b ${rowClass} last:border-0`}
-                >
-                  <td className="py-2 pr-1.5 truncate" title={tx.type}>{tx.tokenName || 'SOL'}</td>
-                  <td className={`py-2 pr-1.5 text-right whitespace-nowrap ${tx.solChange >= 0 ? (isDay ? 'text-green-600' : 'text-green-400') : isDay ? 'text-red-600' : 'text-red-400'}`}>
-                    {formatSolChange(tx.solChange)}
-                  </td>
-                  <td className={`py-2 pr-1.5 text-right whitespace-nowrap ${isDay ? 'text-gray-600' : 'text-white/70'}`}>
-                    {formatPrice(tx.marketCap)}
-                  </td>
-                  <td className={`py-2 text-right whitespace-nowrap ${isDay ? 'text-gray-500' : 'text-white/50'}`}>
-                    {formatTimeAgo(tx.timestamp)}
-                  </td>
+      {/* ── Collapsible transaction list ── */}
+      <div
+        style={{
+          maxHeight: isMinimized ? '0px' : '320px',
+          opacity: isMinimized ? 0 : 1,
+          overflow: 'hidden',
+          transition: 'max-height 0.3s ease, opacity 0.25s ease',
+        }}
+      >
+        <div className={`mt-3 mb-1 ${labelClass}`}>Recent transactions</div>
+        <div className="overflow-y-auto overflow-x-hidden pr-2" style={{ maxHeight: '260px' }}>
+          {transactions.length === 0 ? (
+            <p className={`py-2 font-mono text-xs ${isDay ? 'text-gray-500' : 'text-white/50'}`}>
+              No recent transactions
+            </p>
+          ) : (
+            <table className="w-full table-fixed font-mono text-xs border-collapse">
+              <colgroup>
+                {/* Status | Dir | Token | Amount | Mkt Cap | Time
+                    Panel 460px − p-4(32px) − scrollbar(17px) − pr-2(8px) ≈ 403px
+                    Column budget: 62+40+72+96+76+56 = 402px                         */}
+                <col style={{ width: '62px',  minWidth: '62px'  }} />   {/* Status  */}
+                <col style={{ width: '40px',  minWidth: '40px'  }} />   {/* Dir     */}
+                <col style={{ width: '72px'                      }} />   {/* Token   */}
+                <col style={{ width: '96px'                      }} />   {/* Amount  */}
+                <col style={{ width: '76px'                      }} />   {/* Mkt Cap */}
+                <col style={{ width: '56px'                      }} />   {/* Time    */}
+              </colgroup>
+              <thead>
+                <tr className={`${isDay ? 'text-gray-500' : 'text-white/50'} text-left`}>
+                  {['Status', 'Dir', 'Token', 'Amount', 'Mkt Cap', 'Time'].map((label, col) => (
+                    <th
+                      key={label}
+                      className={`py-2 font-medium ${col < 5 ? 'pr-3' : ''} ${col > 2 ? 'text-right' : ''}`}
+                      style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: stickyBg }}
+                    >
+                      {label}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {transactions.map((tx, i) => {
+                  const dir    = tx.tradeDirection  // 'BUY' | 'SELL' | null
+                  const status = tx.tradeStatus     // 'FIRST'|'MORE'|'PARTIAL'|'ALL'|'SELL'|null
+                  const isBuy  = dir === 'BUY'
+                  const isSell = dir === 'SELL'
+
+                  // Status column colour — each label gets a distinctive hue
+                  const statusColor = status === 'FIRST'
+                    ? (isDay ? 'text-amber-600' : 'text-amber-400')
+                    : status === 'MORE'
+                      ? (isDay ? 'text-blue-600' : 'text-blue-400')
+                      : status === 'PARTIAL'
+                        ? (isDay ? 'text-orange-500' : 'text-orange-400')
+                        : status === 'ALL'
+                          ? (isDay ? 'text-violet-600' : 'text-violet-400')
+                          : (isDay ? 'text-gray-400' : 'text-white/30')
+
+                  // Direction cell colour
+                  const typeColor = isBuy
+                    ? (isDay ? 'text-green-600' : 'text-green-400')
+                    : isSell
+                      ? (isDay ? 'text-red-600' : 'text-red-400')
+                      : (isDay ? 'text-gray-400' : 'text-white/30')
+
+                  // Amount cell colour: green for BUY, red for SELL, sign-based otherwise
+                  const amtColor = isBuy
+                    ? (isDay ? 'text-green-600' : 'text-green-400')
+                    : isSell
+                      ? (isDay ? 'text-red-600' : 'text-red-400')
+                      : tx.solChange >= 0
+                        ? (isDay ? 'text-green-600' : 'text-green-400')
+                        : (isDay ? 'text-red-600' : 'text-red-400')
+
+                  // PnL badge colour (independent of trade type)
+                  const pnlColor = tx.pnlPct != null && tx.pnlPct >= 0
+                    ? (isDay ? 'text-green-600' : 'text-green-400')
+                    : (isDay ? 'text-red-600' : 'text-red-400')
+
+                  return (
+                    <tr
+                      key={tx.signature ? tx.signature : `${tx.timestamp}-${tx.solChange}-${i}`}
+                      className={`border-b ${rowClass} last:border-0`}
+                    >
+                      {/* Status — fixed min-width, never compressed */}
+                      <td className={`py-2.5 pr-3 font-semibold text-[10px] tracking-wide whitespace-nowrap ${statusColor}`}>
+                        {status ?? '—'}
+                      </td>
+
+                      {/* Direction — fixed min-width */}
+                      <td className={`py-2.5 pr-3 font-semibold whitespace-nowrap ${typeColor}`}>
+                        {dir ?? '—'}
+                      </td>
+
+                      {/* Token — truncated to 6 chars, full name on hover */}
+                      <td
+                        className={`py-2.5 pr-3 overflow-hidden ${isDay ? 'text-gray-700' : 'text-white/80'}`}
+                        title={tx.tokenName || 'SOL'}
+                      >
+                        {truncateToken(tx.tokenName)}
+                      </td>
+
+                      {/* Amount + optional PnL% */}
+                      <td className={`py-2.5 pr-3 text-right whitespace-nowrap ${amtColor}`}>
+                        {isBuy || isSell
+                          ? formatSolAbs(tx.solChange)
+                          : formatSolSigned(tx.solChange)}
+                        {isSell && tx.pnlPct != null && (
+                          <span className={`ml-1 ${pnlColor}`}>
+                            {formatPnlPct(tx.pnlPct)}
+                          </span>
+                        )}
+                      </td>
+
+                      {/* Mkt Cap */}
+                      <td className={`py-2.5 pr-3 text-right whitespace-nowrap ${isDay ? 'text-gray-600' : 'text-white/70'}`}>
+                        {formatMktCap(tx.marketCap)}
+                      </td>
+
+                      {/* Time */}
+                      <td className={`py-2.5 text-right whitespace-nowrap ${isDay ? 'text-gray-500' : 'text-white/50'}`}>
+                        {formatTimeAgo(tx.timestamp)}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
     </div>
   )
