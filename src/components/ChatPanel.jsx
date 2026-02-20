@@ -123,9 +123,11 @@ export default function ChatPanel({
 
   const msgUser = 'bg-[#8FD4B8] text-white rounded-br-sm'
 
+  // bg + border only — text/placeholder colour applied directly on the element
+  // to avoid Tailwind cascade ordering conflicts with any parent colour class
   const inputCls = isDay
-    ? 'bg-gray-50 border-gray-200 text-gray-800 placeholder-gray-400'
-    : 'bg-white/8 border-white/15 text-white placeholder-white/30'
+    ? 'bg-gray-50 border-gray-200'
+    : 'bg-white/10 border-white/15'
 
   const tabActive   = isDay ? 'bg-gray-800 text-white'    : 'bg-white/20 text-white'
   const tabInactive = isDay ? 'text-gray-400 hover:text-gray-600' : 'text-white/30 hover:text-white/60'
@@ -292,7 +294,7 @@ export default function ChatPanel({
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') handleSend() }}
                     placeholder="say something…"
-                    className={`flex-1 px-3 py-1.5 rounded-full font-mono text-xs border focus:outline-none transition-colors ${inputCls}`}
+                    className={`flex-1 px-3 py-1.5 rounded-full font-mono text-xs border focus:outline-none transition-colors ${isDay ? 'text-gray-800 placeholder-gray-400' : 'text-white placeholder-white/30'} ${inputCls}`}
                   />
                   <button
                     onClick={handleSend}

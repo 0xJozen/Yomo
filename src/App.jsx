@@ -577,9 +577,9 @@ function App() {
     clearQuickSession()
     resetSession()
     processedTxKeysRef.current = new Set()
+    setWalletFetching(false)
     setDisplayedWallet('')
     setWalletTransactions([])
-    setHeliusReactionBubble(null)
     setShowOnboarding(true)
   }, [resetSession])
 
@@ -756,41 +756,6 @@ function App() {
             onViewWallet={handleViewWallet}
             theme={theme}
           />
-        ) : walletFetching ? (
-          /* ── Wallet loading state — glowing eyes like intro ── */
-          <div className="flex flex-col items-center gap-4">
-            <div className="flex gap-8 mb-1">
-              {[0, 0.15].map((delay, i) => (
-                <div
-                  key={i}
-                  className="h-1 w-12 rounded-full"
-                  style={{
-                    backgroundColor: variantColors[variant],
-                    boxShadow: `0 0 16px ${variantColors[variant]}, 0 0 32px ${variantColors[variant]}`,
-                    animation: `pulse 2s ease-in-out ${delay}s infinite`,
-                  }}
-                />
-              ))}
-            </div>
-            <div
-              className="h-1 w-8 rounded-full"
-              style={{
-                backgroundColor: variantColors[variant],
-                boxShadow: `0 0 12px ${variantColors[variant]}, 0 0 24px ${variantColors[variant]}`,
-                animation: 'pulse 2s ease-in-out 0.1s infinite',
-              }}
-            />
-            <p
-              className="font-mono text-xs mt-2"
-              style={{
-                color: variantColors[variant],
-                opacity: 0.7,
-                animation: 'pulse 2s ease-in-out infinite',
-              }}
-            >
-              fetching trades…
-            </p>
-          </div>
         ) : (
           /* Panel + Yomo side by side, scaled as one unit */
           <div
@@ -968,6 +933,18 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Footer */}
+      <a
+        href="https://x.com/0xJozen"
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`fixed bottom-3 left-1/2 -translate-x-1/2 z-50 font-mono text-[10px] tracking-wide opacity-30 hover:opacity-60 transition-opacity pointer-events-auto select-none ${
+          theme === 'day' ? 'text-gray-700' : 'text-white'
+        }`}
+      >
+        by @0xJozen
+      </a>
     </div>
   )
 }
