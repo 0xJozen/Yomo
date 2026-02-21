@@ -601,7 +601,6 @@ function App() {
       'walletAddress',
       'yomo_wallet_address',
       'yomo_emotion',
-      'yomo_name',
       'user_name',
     ]
     claimKeys.forEach((k) => localStorage.removeItem(k))
@@ -708,7 +707,7 @@ function App() {
       {/* Top-right controls: Disconnect (claimed only) + theme toggle */}
       {!isLoading && (
         <div className="fixed top-4 right-4 z-[60] flex items-center gap-2">
-          {showMainApp && isClaimed && (
+          {isClaimed && (
             <button
               type="button"
               onClick={handleDisconnect}
@@ -759,11 +758,11 @@ function App() {
             theme={theme}
           />
         ) : (
-          /* Panel + Yomo + ChatPanel — centered as one unit, aligned with footer */
-          <div className="w-full flex justify-center">
+          /* Panel + Yomo + ChatPanel — centered to match footer (left-1/2 -translate-x-1/2) */
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
             <div
               className="flex items-center gap-8"
-              style={{ transform: `scale(${scale})`, transformOrigin: 'center center' }}
+              style={{ transform: `scale(${scale}) translateX(-40px)`, transformOrigin: 'center center' }}
             >
             {/* Left: wallet info panel */}
             <WalletInfoPanel
