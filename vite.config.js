@@ -5,9 +5,9 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    // Proxy /api requests to the Vercel dev server (vercel dev runs on :3000).
-    // Run `vercel dev` instead of `npm run dev` to use the serverless functions
-    // locally, or the proxy below forwards to wherever vercel dev is listening.
+    // Forward /api requests to vercel dev (port 3000) when running npm run dev.
+    // When using `vercel dev` directly this proxy is bypassed — requests go
+    // to vercel dev's port and never reach Vite's server directly.
     proxy: {
       '/api': {
         target: 'http://localhost:3000',

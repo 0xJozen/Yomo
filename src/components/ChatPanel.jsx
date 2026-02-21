@@ -81,7 +81,7 @@ export default function ChatPanel({
     setInput('')
     setMessages((prev) => [...prev, { role: 'user', text, id: crypto.randomUUID() }])
     setIsTyping(true)
-    const reply = await generateYomoSpeech({
+    const context = {
       emotion,
       sessionPnl,
       sessionDuration,
@@ -89,7 +89,9 @@ export default function ChatPanel({
       walletAddress,
       yomoName,
       userMessage: text,
-    })
+    }
+    console.log('[ChatPanel] generateYomoSpeech context:', context)
+    const reply = await generateYomoSpeech(context)
     setIsTyping(false)
     setMessages((prev) => [...prev, { role: 'yomo', text: reply, id: crypto.randomUUID() }])
   }, [input, isTyping, emotion, sessionPnl, sessionDuration, recentTrades, walletAddress, yomoName])
@@ -135,6 +137,9 @@ export default function ChatPanel({
   const sendBtn = isDay ? 'bg-gray-800 text-white' : 'bg-white/20 text-white'
 
   const PANEL_H = 480
+
+  // Hide entirely for non-owners (view-only wallets, disconnected state)
+  if (!isOwner) return null
 
   return (
     <div
@@ -302,7 +307,7 @@ export default function ChatPanel({
                     className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 transition-opacity disabled:opacity-30 ${sendBtn}`}
                   >
                     {/* Send arrow */}
-                    <svg className="w-3.5 h-3.5 -rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-3.5 h-3.5" style={{ transform: 'rotate(180deg)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                     </svg>
                   </button>

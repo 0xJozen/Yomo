@@ -356,6 +356,7 @@ function App() {
   const processWalletResult = useCallback((result, isInitial = false) => {
     // All filtered transactions — used for full session detection
     const allTxs = result.transactions || []
+    console.log('[App] processWalletResult — allTxs.length:', allTxs.length, 'setting walletTransactions')
     // Panel only shows the 20 most recent trades (session detection is separate)
     setWalletTransactions(allTxs.slice(0, 20))
     const txs = allTxs
@@ -428,16 +429,18 @@ function App() {
   // Initial fetch when displayedWallet becomes available
   useEffect(() => {
     if (isLoading || showOnboarding || !displayedWallet) return
+    console.log('[App] initial fetch — displayedWallet:', displayedWallet)
     let cancelled = false
     setWalletFetching(true)
     getWalletActivity(displayedWallet).then((result) => {
       if (cancelled) return
       setWalletFetching(false)
       console.log('Helius getWalletActivity result:', {
-        transactionCount: result.transactionCount,
-        recentActivity: result.recentActivity,
-        solChange: result.solChange,
-        emotion: result.emotion
+        rawTxCount:      result.transactionCount,
+        filteredTxCount: result.transactions?.length ?? 0,
+        recentActivity:  result.recentActivity,
+        solChange:       result.solChange,
+        emotion:         result.emotion,
       })
       processWalletResultRef.current(result, true)
     })
@@ -607,7 +610,6 @@ function App() {
     processedTxKeysRef.current = new Set()
     setDisplayedWallet('')
     setWalletTransactions([])
-    setHeliusReactionBubble(null)
     setShowOnboarding(true)
   }, [resetSession])
 
@@ -744,7 +746,7 @@ function App() {
           Main app: WalletInfoPanel + Yomo sit side by side in a flex row, both
           scaled together so they stay proportional and centred as a unit.
       ─────────────────────────────────────────────────────────────────────── */}
-      <div className="fixed inset-0 flex items-center justify-center overflow-hidden">
+      <div className="fixed inset-0 w-full flex items-center justify-center overflow-hidden">
         {isLoading ? (
           <LoadingScreen
             onComplete={handleLoadingComplete}
@@ -757,11 +759,12 @@ function App() {
             theme={theme}
           />
         ) : (
-          /* Panel + Yomo side by side, scaled as one unit */
-          <div
-            className="flex items-center gap-8"
-            style={{ transform: `scale(${scale})`, transformOrigin: 'center center' }}
-          >
+          /* Panel + Yomo + ChatPanel — centered as one unit, aligned with footer */
+          <div className="w-full flex justify-center">
+            <div
+              className="flex items-center gap-8"
+              style={{ transform: `scale(${scale})`, transformOrigin: 'center center' }}
+            >
             {/* Left: wallet info panel */}
             <WalletInfoPanel
               theme={theme}
@@ -930,6 +933,7 @@ function App() {
               yomoName={yomoDisplayName}
               addMessageRef={addYomoToChatRef}
             />
+            </div>
           </div>
         )}
       </div>

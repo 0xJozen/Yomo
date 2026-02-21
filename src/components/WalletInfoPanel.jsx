@@ -50,6 +50,7 @@ function formatMktCap(value) {
 }
 
 const WalletInfoPanel = ({ theme, transactions = [] }) => {
+  console.log('[WalletInfoPanel] render — transactions prop:', transactions.length, transactions)
   const [isMinimized, setIsMinimized] = useState(false)
 
   const isDay = theme === 'day'

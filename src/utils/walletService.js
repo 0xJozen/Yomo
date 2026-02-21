@@ -5,6 +5,11 @@
 const HELIUS_BASE = 'https://api.helius.xyz/v0'
 const LAMPORTS_PER_SOL = 1e9
 
+const heliusKey = typeof import.meta !== 'undefined' && import.meta.env?.VITE_HELIUS_API_KEY
+  ? String(import.meta.env.VITE_HELIUS_API_KEY)
+  : ''
+console.log('[walletService] VITE_HELIUS_API_KEY (first 8 chars):', heliusKey ? `${heliusKey.slice(0, 8)}…` : '(empty)')
+
 // ── Pagination constants ──────────────────────────────────────────────────────
 const PAGE_SIZE             = 100   // transactions per Helius request
 const MAX_PAGES             = 10    // hard cap  → 1000 raw transactions total
