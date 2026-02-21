@@ -826,8 +826,8 @@ function App() {
     }
   }, [isPublic, displayedWallet])
 
-  // Private applies globally — owner sees it too until they toggle back to public
-  const isDisplayedWalletPrivate = isViewingOwnWallet ? !isPublic : !viewedWalletIsPublic
+  // Private only applies to non-owners; owner always sees full view when connected
+  const isDisplayedWalletPrivate = isViewingOwnWallet ? false : !viewedWalletIsPublic
   // Chat/notes only for claimed owner actively connected via Phantom
   const isOwner = isViewingOwnWallet && isClaimed
 
@@ -1017,8 +1017,8 @@ function App() {
                     theme === 'day' ? 'bg-black/8 text-gray-600' : 'bg-white/10 text-white/60'
                   }`}
                 >
-                  {/* Editable Yomo name — only for claimed wallets */}
-                  {isClaimed && isEditingYomoName ? (
+                  {/* Editable Yomo name — only for owner viewing own wallet */}
+                  {isViewingOwnWallet && isClaimed && isEditingYomoName ? (
                     <input
                       ref={yomoNameInputRef}
                       type="text"
@@ -1066,8 +1066,8 @@ function App() {
                     </span>
                   )}
 
-                  {/* Pencil rename button — claimed wallets only, not while editing */}
-                  {isClaimed && !isEditingYomoName && (
+                  {/* Pencil rename button — owner viewing own wallet only */}
+                  {isViewingOwnWallet && isClaimed && !isEditingYomoName && (
                     <button
                       type="button"
                       onClick={handleStartYomoRename}

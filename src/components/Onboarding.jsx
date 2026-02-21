@@ -509,6 +509,20 @@ const Onboarding = ({ onComplete, onViewWallet, theme = 'night' }) => {
     <div className={`fixed inset-0 ${backgroundClass} z-50 flex items-center justify-center transition-colors duration-300`}>
       <div className="flex flex-col items-center justify-center w-full max-w-lg px-4">
 
+        {/* YOMO title — game logo style */}
+        <h1
+          className="mb-6 text-5xl sm:text-6xl md:text-7xl font-bold tracking-tight"
+          style={{
+            fontFamily: "'Pixelify Sans', sans-serif",
+            color: '#8FD4B8',
+            textShadow: theme === 'day'
+              ? '0 2px 4px rgba(0,0,0,0.15), 0 0 20px rgba(143,212,184,0.3)'
+              : '0 2px 8px rgba(0,0,0,0.4), 0 0 24px rgba(143,212,184,0.25)',
+          }}
+        >
+          YOMO
+        </h1>
+
         {/* Yomo + speech bubble */}
         <div className="relative flex items-center justify-center mb-6">
           <motion.div
