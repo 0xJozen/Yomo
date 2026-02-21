@@ -77,6 +77,11 @@ export default function CheckInModal({ theme, onComplete, yomoName = 'Yomo' }) {
     onComplete?.()
   }
 
+  const handleDismiss = () => {
+    saveCheckIn('skipped')
+    onComplete?.()
+  }
+
   return (
     <div
       className={`fixed inset-0 z-[70] flex items-center justify-center ${
@@ -84,10 +89,22 @@ export default function CheckInModal({ theme, onComplete, yomoName = 'Yomo' }) {
       } backdrop-blur-sm`}
     >
       <div
-        className={`max-w-sm w-full mx-4 rounded-2xl p-6 shadow-xl ${
+        className={`max-w-sm w-full mx-4 rounded-2xl p-6 shadow-xl relative ${
           isDay ? 'bg-white border border-gray-200' : 'bg-white/10 border border-white/20'
         }`}
       >
+        <button
+          type="button"
+          onClick={handleDismiss}
+          aria-label="Skip check-in"
+          className={`absolute top-3 right-3 w-7 h-7 flex items-center justify-center rounded-full opacity-50 hover:opacity-90 transition-opacity ${
+            isDay ? 'text-gray-500 hover:bg-gray-100' : 'text-white/60 hover:bg-white/10'
+          }`}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
         <p
           className={`font-mono text-sm mb-4 ${
             isDay ? 'text-gray-700' : 'text-white/90'

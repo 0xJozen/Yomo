@@ -73,6 +73,14 @@ const EXCLUDED_MINTS = new Set([
   'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',  // USDT
 ])
 
+const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+const USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
+const STABLECOIN_MINTS = new Set([USDC_MINT, USDT_MINT])
+
+// SOL price cache for USDC→SOL conversion (5 min TTL)
+let solPriceCache = { priceUsd: null, ts: 0 }
+const SOL_PRICE_CACHE_MS = 5 * 60 * 1000
+
 /** Return true only for addresses that look like a genuine SPL token mint. */
 function isValidMint(m) {
   return typeof m === 'string' && m.length >= 32 && !EXCLUDED_MINTS.has(m)
@@ -220,6 +228,95 @@ function extractTokenAmount(tx, mint) {
   }
 
   return 0
+}
+
+/**
+ * Fetch SOL price in USD from DexScreener (wSOL pair). Cached for 5 minutes.
+ * @returns {Promise<number|null>} SOL price in USD, or null on failure
+ */
+async function getSolPriceUsd() {
+  const now = Date.now()
+  if (solPriceCache.priceUsd != null && now - solPriceCache.ts < SOL_PRICE_CACHE_MS) {
+    return solPriceCache.priceUsd
+  }
+  try {
+    const res = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112')
+    const json = await res.json()
+    const pairs = Array.isArray(json?.pairs) ? json.pairs : []
+    const solUsdcPair = pairs.find(
+      (p) => (p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT') && p.priceUsd != null
+    ) || pairs.find((p) => {
+      const pv = parseFloat(p.priceUsd)
+      return !isNaN(pv) && pv > 10 && pv < 10000
+    })
+    const price = solUsdcPair?.priceUsd != null ? parseFloat(solUsdcPair.priceUsd) : null
+    if (price != null && price > 0) {
+      solPriceCache = { priceUsd: price, ts: now }
+      return price
+    }
+  } catch (err) {
+    console.warn('[walletService] SOL price fetch failed:', err)
+  }
+  return solPriceCache.priceUsd
+}
+
+/**
+ * Extract stablecoin (USDC/USDT) amount and direction for swaps where SOL change is minimal.
+ * Used when user swaps USDC→token (BUY) or token→USDC (SELL) — native SOL change is ~0.
+ *
+ * @param {object} tx - Helius enhanced transaction
+ * @param {string} normalizedAddress - user wallet (lowercase)
+ * @returns {Promise<{ solEquivalent: number, direction: 'BUY'|'SELL' }|null>}
+ */
+async function extractStablecoinSolEquivalent(tx, normalizedAddress) {
+  let stablecoinAmount = 0
+  let userSentStablecoin = false
+
+  // 1. tokenTransfers — Helius uses fromUserAccount/toUserAccount for wallet addresses
+  for (const tt of tx.tokenTransfers || []) {
+    const mint = (tt.mint ?? tt.tokenMint ?? '').toLowerCase()
+    if (!STABLECOIN_MINTS.has(mint)) continue
+
+    const amt = parseFloat(tt.tokenAmount ?? tt.tokenAmountUi ?? '0')
+    if (amt <= 0) continue
+
+    const fromUser = (tt.fromUserAccount ?? '').toLowerCase()
+    const toUser = (tt.toUserAccount ?? '').toLowerCase()
+
+    if (fromUser === normalizedAddress) {
+      stablecoinAmount += amt
+      userSentStablecoin = true
+    } else if (toUser === normalizedAddress) {
+      stablecoinAmount += amt
+      userSentStablecoin = false
+    }
+  }
+
+  // 2. Fallback: accountData.tokenBalanceChanges (delta = negative means user sent)
+  if (stablecoinAmount <= 0 && Array.isArray(tx.accountData)) {
+    for (const ad of tx.accountData) {
+      if ((ad.account ?? '').toLowerCase() !== normalizedAddress) continue
+      for (const tbc of ad.tokenBalanceChanges ?? []) {
+        const mint = (tbc.mint ?? '').toLowerCase()
+        if (!STABLECOIN_MINTS.has(mint)) continue
+        const delta = parseFloat(tbc.tokenBalanceChange ?? tbc.userTokenAmount?.uiTokenAmount?.uiAmount ?? '0')
+        if (Math.abs(delta) < 0.0001) continue
+        stablecoinAmount += Math.abs(delta)
+        userSentStablecoin = delta < 0
+      }
+    }
+  }
+
+  if (stablecoinAmount <= 0) return null
+
+  const solPrice = await getSolPriceUsd()
+  if (solPrice == null || solPrice <= 0) return null
+
+  const solEquivalent = stablecoinAmount / solPrice
+  return {
+    solEquivalent,
+    direction: userSentStablecoin ? 'BUY' : 'SELL'
+  }
 }
 
 // ─── DexScreener token resolution ────────────────────────────────────────────
@@ -514,16 +611,28 @@ export const getWalletActivity = async (address) => {
         solChangeLamports += txChange
       }
 
-      const solChangeTx = txChange / LAMPORTS_PER_SOL
+      let solChangeTx = txChange / LAMPORTS_PER_SOL
+      const isSwap = (tx.type || '').toUpperCase() === 'SWAP'
+
+      // USDC/USDT-input swaps: native SOL change is ~0; convert stablecoin amount to SOL equivalent
+      if (isSwap && Math.abs(solChangeTx) < 0.001) {
+        const stable = await extractStablecoinSolEquivalent(tx, normalizedAddress)
+        if (stable) {
+          solChangeTx = stable.direction === 'BUY' ? -stable.solEquivalent : stable.solEquivalent
+          if (isRecent24h) {
+            solChangeLamports += Math.round(solChangeTx * LAMPORTS_PER_SOL)
+          }
+        }
+      }
+
       let type = 'Transfer'
       if (tx.type) type = tx.type
       else if (solChangeTx > 0) type = 'Received'
       else if (solChangeTx < 0) type = 'Sent'
       const signature = tx.signature || tx.transactionSignature || null
 
-      // For SWAP transactions: BUY = spent SOL to get a token (negative change),
-      // SELL = received SOL from disposing a token (positive change).
-      const isSwap = (tx.type || '').toUpperCase() === 'SWAP'
+      // For SWAP transactions: BUY = spent SOL/stablecoin to get a token (negative change),
+      // SELL = received SOL/stablecoin from disposing a token (positive change).
       const tradeDirection = isSwap
         ? (solChangeTx < 0 ? 'BUY' : solChangeTx > 0 ? 'SELL' : null)
         : null

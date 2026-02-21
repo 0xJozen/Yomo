@@ -37,7 +37,7 @@ function ensureYomoStorageVersion() {
   const keysToRemove = [...knownKeys]
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
-    if (key && key.includes('yomo') && key !== 'yomo_journal' && key !== 'yomo_claimed_wallet' && key !== 'yomo_checkin' && !key.startsWith('yomo_is_public') && !keysToRemove.includes(key)) keysToRemove.push(key)
+    if (key && key.includes('yomo') && key !== 'yomo_journal' && key !== 'yomo_claimed_wallet' && key !== 'yomo_checkin' && key !== 'yomo_wallet_search_history' && !key.startsWith('yomo_is_public') && !keysToRemove.includes(key)) keysToRemove.push(key)
   }
   keysToRemove.forEach((k) => localStorage.removeItem(k))
   localStorage.setItem('yomo_version', YOMO_VERSION)
@@ -67,6 +67,26 @@ function getScale() {
 const truncateWallet = (addr) => {
   if (!addr || addr.length < 10) return addr || ''
   return `${addr.slice(0, 4)}...${addr.slice(-4)}`
+}
+
+const SEARCH_HISTORY_KEY = 'yomo_wallet_search_history'
+const SEARCH_HISTORY_MAX = 5
+
+function loadSearchHistory() {
+  try {
+    const raw = localStorage.getItem(SEARCH_HISTORY_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch { return [] }
+}
+
+function saveSearchHistory(addr) {
+  if (!addr || typeof addr !== 'string') return
+  const trimmed = addr.trim().toLowerCase()
+  if (!trimmed) return
+  let list = loadSearchHistory().filter((a) => a.toLowerCase() !== trimmed)
+  list.unshift(addr.trim())
+  list = list.slice(0, SEARCH_HISTORY_MAX)
+  localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(list))
 }
 
 function formatElapsed(seconds) {
@@ -263,7 +283,21 @@ function App() {
   const [viewedWalletIsPublic, setViewedWalletIsPublic] = useState(true)
   const [walletSearchInput, setWalletSearchInput] = useState('')
   const [walletSearchError, setWalletSearchError] = useState('')
+  const [searchHistory, setSearchHistory] = useState(loadSearchHistory)
+  const [showSearchDropdown, setShowSearchDropdown] = useState(false)
+  const [addressCopied, setAddressCopied] = useState(false)
+  const searchContainerRef = useRef(null)
   const hasShownWelcomeBack = useRef(false)
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target)) {
+        setShowSearchDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
   // Only run when we transition to main app (both false). Don't depend on showWelcomeBackOnMain to avoid extra runs.
   useEffect(() => {
     if (isLoading || showOnboarding) return
@@ -653,8 +687,17 @@ function App() {
     }
     setWalletSearchError('')
     setWalletSearchInput('')
+    saveSearchHistory(trimmed)
+    setSearchHistory(loadSearchHistory())
+    setShowSearchDropdown(false)
     handleViewWallet(trimmed)
   }, [walletSearchInput, handleViewWallet])
+
+  const handleSelectHistoryAddress = useCallback((addr) => {
+    setWalletSearchInput('')
+    setShowSearchDropdown(false)
+    handleViewWallet(addr)
+  }, [handleViewWallet])
 
   // Responsive scaling state — getScale() is defined at module level (stable reference)
   const [scale, setScale] = useState(getScale)
@@ -783,7 +826,8 @@ function App() {
     }
   }, [isPublic, displayedWallet])
 
-  const showPrivateOverlay = !isViewingOwnWallet && !viewedWalletIsPublic
+  // Private applies globally — owner sees it too until they toggle back to public
+  const isDisplayedWalletPrivate = isViewingOwnWallet ? !isPublic : !viewedWalletIsPublic
   // Chat/notes only for claimed owner actively connected via Phantom
   const isOwner = isViewingOwnWallet && isClaimed
 
@@ -846,25 +890,50 @@ function App() {
         ) : (
           /* Main app: search bar at top, panel row centered below */
           <div className="absolute inset-0 flex flex-col">
-            {/* Wallet search — top center, subtle, owner only */}
-            {isClaimed && (
-              <div className="flex justify-center pt-6 pb-2 flex-shrink-0">
+            {/* Wallet search — top center, subtle, all users */}
+            <div className="flex justify-center pt-6 pb-2 flex-shrink-0" style={{ marginLeft: '18px' }}>
+              <div ref={searchContainerRef} className="relative flex flex-col items-center">
                 <form
                   onSubmit={(e) => { e.preventDefault(); handleWalletSearch() }}
                   className="flex flex-col items-center gap-1"
                 >
                   <div className="flex items-center gap-1.5">
-                    <input
-                      type="text"
-                      value={walletSearchInput}
-                      onChange={(e) => { setWalletSearchInput(e.target.value); setWalletSearchError('') }}
-                      placeholder="Search wallet…"
-                      className={`w-44 font-mono text-xs px-3 py-1.5 rounded-lg border outline-none transition-colors ${
-                        theme === 'day'
-                          ? 'border-gray-300/80 bg-white/70 text-gray-700 placeholder-gray-400 focus:border-gray-400'
-                          : 'border-white/15 bg-white/5 text-white placeholder-white/40 focus:border-white/30'
-                      }`}
-                    />
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={walletSearchInput}
+                        onChange={(e) => { setWalletSearchInput(e.target.value); setWalletSearchError('') }}
+                        onFocus={() => setShowSearchDropdown(searchHistory.length > 0)}
+                        placeholder="Search wallet…"
+                        className={`w-44 font-mono text-xs px-3 py-1.5 rounded-lg border outline-none transition-colors ${
+                          theme === 'day'
+                            ? 'border-gray-300/80 bg-white/70 text-gray-700 placeholder-gray-400 focus:border-gray-400'
+                            : 'border-white/15 bg-white/5 text-white placeholder-white/40 focus:border-white/30'
+                        }`}
+                      />
+                      {showSearchDropdown && searchHistory.length > 0 && (
+                        <div
+                          className={`absolute top-full left-0 mt-1 w-44 rounded-lg border shadow-lg py-1 z-50 max-h-40 overflow-y-auto ${
+                            theme === 'day'
+                              ? 'bg-white border-gray-200'
+                              : 'bg-[#1a1d2e] border-white/20'
+                          }`}
+                        >
+                          {searchHistory.map((addr) => (
+                            <button
+                              key={addr}
+                              type="button"
+                              onClick={() => handleSelectHistoryAddress(addr)}
+                              className={`w-full text-left px-3 py-2 font-mono text-xs hover:bg-black/5 ${
+                                theme === 'day' ? 'text-gray-700 hover:bg-gray-100' : 'text-white/80 hover:bg-white/10'
+                              }`}
+                            >
+                              {truncateWallet(addr)}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <button
                       type="submit"
                       className={`p-1.5 rounded-lg opacity-60 hover:opacity-90 transition-opacity ${
@@ -884,15 +953,15 @@ function App() {
                   )}
                 </form>
               </div>
-            )}
+            </div>
             {/* Panel row — WalletInfoPanel, Yomo, ChatPanel — nudge left for visual balance */}
             <div className="flex-1 flex items-center justify-center min-h-0">
             <div
               className="flex items-center gap-8"
               style={{ transform: `scale(${scale}) translateX(-65px)`, transformOrigin: 'center center' }}
             >
-            {/* Left: wallet info panel or locked message when viewing private Yomo */}
-            {showPrivateOverlay ? (
+            {/* Left: wallet info panel or locked message when Yomo is private (applies to all including owner) */}
+            {isDisplayedWalletPrivate ? (
               <div
                 className={`flex flex-col items-center justify-center w-48 min-h-[200px] rounded-xl font-mono text-sm ${
                   theme === 'day' ? 'bg-black/6 text-gray-500' : 'bg-white/8 text-white/50'
@@ -913,7 +982,7 @@ function App() {
             {/* Centre: Yomo + wallet label + session tracker */}
             <div className="flex flex-col items-center">
 
-              {/* Public/private toggle — above name label, connected owner only */}
+              {/* Public/private toggle — above name label, owner only (visible even when private so they can toggle back) */}
               {isClaimed && displayedWallet && isViewingOwnWallet && (
                 <div className="mb-2">
                   <button
@@ -967,8 +1036,33 @@ function App() {
                       }`}
                     />
                   ) : (
-                    <span title={displayedWallet}>
+                    <span title={displayedWallet} className="flex items-center gap-1.5">
                       {yomoDisplayName || truncateWallet(displayedWallet)}
+                      {!isViewingOwnWallet && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(displayedWallet)
+                              setAddressCopied(true)
+                              setTimeout(() => setAddressCopied(false), 1500)
+                            } catch {}
+                          }}
+                          className={`flex-shrink-0 p-0.5 rounded opacity-60 hover:opacity-100 transition-opacity ${
+                            theme === 'day' ? 'text-gray-500' : 'text-white/50'
+                          }`}
+                          title="Copy address"
+                          aria-label="Copy address"
+                        >
+                          {addressCopied ? (
+                            <span className="font-mono text-[9px] text-green-500">copied</span>
+                          ) : (
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                          )}
+                        </button>
+                      )}
                     </span>
                   )}
 
@@ -1020,18 +1114,31 @@ function App() {
               )}
 
               <div className="relative flex items-center justify-center">
-                <Yomo
-                  emotion={showWelcomeBack ? 'happy' : emotion}
-                  variant={variant}
-                  variantColor={variantColors[variant]}
-                />
-                {showWelcomeBack && (
+                <div className={isDisplayedWalletPrivate ? 'blur-sm opacity-60 select-none pointer-events-none' : ''}>
+                  <Yomo
+                    emotion={showWelcomeBack ? 'happy' : emotion}
+                    variant={variant}
+                    variantColor={variantColors[variant]}
+                  />
+                </div>
+                {isDisplayedWalletPrivate && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className={`p-3 rounded-full ${
+                      theme === 'day' ? 'bg-black/10' : 'bg-white/10'
+                    }`}>
+                      <svg className="w-10 h-10 opacity-80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                      </svg>
+                    </div>
+                  </div>
+                )}
+                {showWelcomeBack && !isDisplayedWalletPrivate && (
                   <SpeechBubble text="welcome back! 👋" isVisible={true} />
                 )}
-
               </div>
 
-              {/* Session tracker below Yomo */}
+              {/* Session tracker below Yomo — hidden when private */}
+              {!isDisplayedWalletPrivate && (
               <div className="mt-4 flex flex-col items-center gap-1">
                 <div className="flex items-center gap-2">
                 {showStats && (
@@ -1097,22 +1204,25 @@ function App() {
                   </span>
                 )}
               </div>
+              )}
 
             </div>
 
-            {/* Right: chat panel — only for claimed owner viewing own wallet */}
-            <ChatPanel
-              theme={theme}
-              isOwner={isOwner}
-              emotion={emotion}
-              sessionPnl={sessionDisplay.pnl}
-              sessionDuration={sessionDisplay.elapsed}
-              recentTrades={walletTransactions.slice(0, 5)}
-              walletAddress={displayedWallet}
-              yomoName={yomoDisplayName}
-              streak={streak}
-              addMessageRef={addYomoToChatRef}
-            />
+            {/* Right: chat panel — hidden when private */}
+            {!isDisplayedWalletPrivate && (
+              <ChatPanel
+                theme={theme}
+                isOwner={isOwner}
+                emotion={emotion}
+                sessionPnl={sessionDisplay.pnl}
+                sessionDuration={sessionDisplay.elapsed}
+                recentTrades={walletTransactions.slice(0, 5)}
+                walletAddress={displayedWallet}
+                yomoName={yomoDisplayName}
+                streak={streak}
+                addMessageRef={addYomoToChatRef}
+              />
+            )}
             </div>
             </div>
           </div>
