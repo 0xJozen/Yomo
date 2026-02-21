@@ -32,6 +32,7 @@ function formatTime(ms) {
  * @param {Array}   [props.recentTrades]     - last 5 txs for Claude context
  * @param {string}  [props.walletAddress]
  * @param {string}  [props.yomoName]
+ * @param {number}  [props.streak]           - daily check-in streak
  * @param {object}  props.addMessageRef      - ref; caller writes fn → push Yomo msg
  */
 export default function ChatPanel({
@@ -43,6 +44,7 @@ export default function ChatPanel({
   recentTrades = [],
   walletAddress = '',
   yomoName = '',
+  streak = 0,
   addMessageRef,
 }) {
   const [messages, setMessages]   = useState([])
@@ -88,13 +90,14 @@ export default function ChatPanel({
       recentTrades,
       walletAddress,
       yomoName,
+      streak,
       userMessage: text,
     }
     console.log('[ChatPanel] generateYomoSpeech context:', context)
     const reply = await generateYomoSpeech(context)
     setIsTyping(false)
     setMessages((prev) => [...prev, { role: 'yomo', text: reply, id: crypto.randomUUID() }])
-  }, [input, isTyping, emotion, sessionPnl, sessionDuration, recentTrades, walletAddress, yomoName])
+  }, [input, isTyping, emotion, sessionPnl, sessionDuration, recentTrades, walletAddress, yomoName, streak])
 
   // ── Notes tab helpers ────────────────────────────────────────────────────
   const addNote = () => {

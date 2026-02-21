@@ -40,6 +40,7 @@ export async function generateYomoSpeech(context) {
     walletAddress = '',
     yomoName = '',
     userMessage = '',
+    streak = 0,
   } = context
 
   // User-initiated chat messages are never cached (they're conversational)
@@ -68,6 +69,7 @@ export async function generateYomoSpeech(context) {
         walletAddress,
         yomoName,
         userMessage,
+        streak,
       }),
     })
 

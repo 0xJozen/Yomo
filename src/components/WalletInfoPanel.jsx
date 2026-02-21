@@ -50,35 +50,28 @@ function formatMktCap(value) {
 }
 
 const WalletInfoPanel = ({ theme, transactions = [] }) => {
-  console.log('[WalletInfoPanel] render — transactions prop:', transactions.length, transactions)
   const [isMinimized, setIsMinimized] = useState(false)
 
   const isDay = theme === 'day'
   const panelClass = isDay
-    ? 'bg-white/90 border border-gray-200 shadow-xl text-gray-800'
-    : 'bg-white/10 border border-white/20 shadow-xl text-white backdrop-blur-md'
-  const labelClass = isDay ? 'text-gray-600 font-mono text-xs' : 'text-white/70 font-mono text-xs'
+    ? 'bg-white/85 border border-gray-200/80 shadow-lg text-gray-800'
+    : 'bg-white/8 border border-white/15 shadow-lg text-white backdrop-blur-md'
+  const labelClass = isDay ? 'text-gray-500 font-mono text-[11px]' : 'text-white/60 font-mono text-[11px]'
   // Solid opaque colour for sticky header cells — must exactly cover scrolling body rows.
-  // Day panel is white/90 over a light background → #f5f5f5 is visually indistinguishable.
-  // Night panel is white/10 over the deep-indigo gradient → #181c2e approximates the result.
-  const stickyBg = isDay ? '#f5f5f5' : '#181c2e'
-  const rowClass = isDay ? 'border-gray-200' : 'border-white/15'
+  const stickyBg = isDay ? '#f8f8f8' : '#181c2e'
+  const rowClass = isDay ? 'border-gray-200/60' : 'border-white/12'
 
   return (
-    <div className={`rounded-xl p-4 w-[460px] overflow-hidden ${panelClass}`}>
+    <div className={`rounded-xl p-3 w-[460px] overflow-hidden ${panelClass}`}>
 
-      {/* ── Header: title + minimize toggle ── */}
-      <div className="flex items-start justify-between mb-1">
-        <div className="flex-1 min-w-0">
-          <div className={labelClass}>Recent Trades</div>
-        </div>
-
-        {/* Minimize / expand toggle */}
+      {/* Header: title + minimize toggle */}
+      <div className="flex items-center justify-between mb-2">
+        <span className={labelClass}>Recent Trades</span>
         <button
           type="button"
           onClick={() => setIsMinimized((v) => !v)}
           aria-label={isMinimized ? 'Expand panel' : 'Minimize panel'}
-          className={`ml-2 mt-0.5 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded transition-opacity hover:opacity-70 ${isDay ? 'text-gray-500' : 'text-white/60'}`}
+          className={`flex-shrink-0 w-5 h-5 flex items-center justify-center rounded opacity-50 hover:opacity-80 transition-opacity ${isDay ? 'text-gray-500' : 'text-white/50'}`}
         >
           {isMinimized ? (
             /* Plus sign */
@@ -94,7 +87,7 @@ const WalletInfoPanel = ({ theme, transactions = [] }) => {
         </button>
       </div>
 
-      {/* ── Collapsible transaction list ── */}
+      {/* Collapsible transaction list */}
       <div
         style={{
           maxHeight: isMinimized ? '0px' : '320px',
@@ -103,8 +96,7 @@ const WalletInfoPanel = ({ theme, transactions = [] }) => {
           transition: 'max-height 0.3s ease, opacity 0.25s ease',
         }}
       >
-        <div className={`mt-3 mb-1 ${labelClass}`}>Recent transactions</div>
-        <div className="overflow-y-auto overflow-x-hidden pr-2" style={{ maxHeight: '260px' }}>
+        <div className="overflow-y-auto overflow-x-hidden pr-2" style={{ maxHeight: '280px' }}>
           {transactions.length === 0 ? (
             <p className={`py-2 font-mono text-xs ${isDay ? 'text-gray-500' : 'text-white/50'}`}>
               No recent transactions

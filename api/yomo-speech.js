@@ -55,6 +55,7 @@ export default async function handler(req, res) {
     walletAddress = '',
     yomoName = '',
     userMessage = '',
+    streak = 0,
   } = req.body ?? {}
 
   // Format session PnL
@@ -97,6 +98,7 @@ export default async function handler(req, res) {
       ? `- Wallet: ${walletAddress.slice(0, 5)}…${walletAddress.slice(-4)}`
       : '',
     yomoName ? `- My name is ${yomoName}` : '',
+    streak > 0 ? `- Daily check-in streak: ${streak} day(s). Acknowledge it warmly when it grows; if it was just broken (streak 0 after being higher), react gently sad.` : '',
   ]
 
   // When a user typed something, frame it as a direct reply; otherwise react to trades

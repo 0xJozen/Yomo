@@ -7,8 +7,9 @@ import WalletConnect from './components/WalletConnect'
 import ThemeToggle from './components/ThemeToggle'
 import WalletInfoPanel from './components/WalletInfoPanel'
 import ChatPanel from './components/ChatPanel'
+import CheckInModal, { shouldShowCheckIn, getStreak } from './components/CheckInModal'
 import { getWalletActivity } from './utils/walletService'
-import { getVariantForAddress, saveVariantForAddress } from './utils/walletValidation'
+import { getVariantForAddress, saveVariantForAddress, validateSolanaAddress } from './utils/walletValidation'
 import { generateYomoSpeech } from './utils/claudeService'
 import './styles/animations.css'
 
@@ -36,7 +37,7 @@ function ensureYomoStorageVersion() {
   const keysToRemove = [...knownKeys]
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
-    if (key && key.includes('yomo') && key !== 'yomo_journal' && key !== 'yomo_claimed_wallet' && !keysToRemove.includes(key)) keysToRemove.push(key)
+    if (key && key.includes('yomo') && key !== 'yomo_journal' && key !== 'yomo_claimed_wallet' && key !== 'yomo_checkin' && !key.startsWith('yomo_is_public') && !keysToRemove.includes(key)) keysToRemove.push(key)
   }
   keysToRemove.forEach((k) => localStorage.removeItem(k))
   localStorage.setItem('yomo_version', YOMO_VERSION)
@@ -256,6 +257,12 @@ function App() {
   const [walletFetching, setWalletFetching] = useState(false)
   const [showStats, setShowStats] = useState(true)
   const [sessionDisplay, setSessionDisplay] = useState({ active: false, elapsed: 0, pnl: 0 })
+  const [showCheckIn, setShowCheckIn] = useState(false)
+  const [streak, setStreak] = useState(0)
+  const [isPublic, setIsPublic] = useState(true)
+  const [viewedWalletIsPublic, setViewedWalletIsPublic] = useState(true)
+  const [walletSearchInput, setWalletSearchInput] = useState('')
+  const [walletSearchError, setWalletSearchError] = useState('')
   const hasShownWelcomeBack = useRef(false)
   // Only run when we transition to main app (both false). Don't depend on showWelcomeBackOnMain to avoid extra runs.
   useEffect(() => {
@@ -278,12 +285,15 @@ function App() {
     if (saved) setDisplayedWallet(saved)
   }, [isLoading, showOnboarding, displayedWallet])
 
+
   // Ref for pushing Yomo trade-reaction messages into ChatPanel
   const addYomoToChatRef = useRef(null)
 
-  // Mirror displayedWallet into a ref so memoised callbacks always read the latest value
+  // Mirror displayedWallet and streak into refs so memoised callbacks always read the latest value
   const displayedWalletRef = useRef('')
   displayedWalletRef.current = displayedWallet
+  const streakRef = useRef(0)
+  streakRef.current = streak
 
   // Session-based emotion: swap-in starts session, swap-out realizes PnL, 4h inactivity resets
   const processedTxKeysRef = useRef(new Set())
@@ -323,6 +333,7 @@ function App() {
       recentTrades:    (txsForContext || []).slice(0, 5),
       walletAddress:   displayedWalletRef.current,
       yomoName:        localStorage.getItem('yomo_name') || '',
+      streak:          streakRef.current,
     })
     addYomoToChatRef.current?.(text)
     afterCb?.()
@@ -629,6 +640,22 @@ function App() {
     setTheme(newTheme)
   }, [])
 
+  const handleWalletSearch = useCallback(() => {
+    const trimmed = walletSearchInput.trim()
+    if (!trimmed) {
+      setWalletSearchError('Enter a wallet address')
+      return
+    }
+    const { isValid, error } = validateSolanaAddress(trimmed)
+    if (!isValid) {
+      setWalletSearchError(error)
+      return
+    }
+    setWalletSearchError('')
+    setWalletSearchInput('')
+    handleViewWallet(trimmed)
+  }, [walletSearchInput, handleViewWallet])
+
   // Responsive scaling state — getScale() is defined at module level (stable reference)
   const [scale, setScale] = useState(getScale)
 
@@ -701,6 +728,65 @@ function App() {
     setIsEditingYomoName(false)
   }
 
+  // Daily check-in: show prompt when claimed user opens main app and hasn't checked in today
+  useEffect(() => {
+    if (isLoading || showOnboarding) return
+    const isClaimedUser = localStorage.getItem('connectedViaPhantom') === 'true'
+    const isOwnWallet = !!claimedWalletAddr && displayedWallet === claimedWalletAddr
+    if (!isClaimedUser || !isOwnWallet || !displayedWallet) return
+    setStreak(getStreak())
+    if (shouldShowCheckIn()) setShowCheckIn(true)
+  }, [isLoading, showOnboarding, displayedWallet, claimedWalletAddr])
+
+  const handleCheckInComplete = useCallback(() => {
+    setShowCheckIn(false)
+    setStreak(getStreak())
+  }, [])
+
+  // Load isPublic from localStorage when viewing own wallet
+  useEffect(() => {
+    if (!displayedWallet || !isViewingOwnWallet) return
+    const key = `yomo_is_public_${displayedWallet}`
+    const val = localStorage.getItem(key)
+    setIsPublic(val === null ? true : val === 'true')
+  }, [displayedWallet, isViewingOwnWallet])
+
+  // Fetch viewed wallet's public preference when in view-only mode
+  // Use displayedWallet (viewed address) to look up preference, not connected wallet
+  useEffect(() => {
+    if (!displayedWallet || isViewingOwnWallet) {
+      setViewedWalletIsPublic(true)
+      return
+    }
+    // First check localStorage (e.g. same device, owner viewing after disconnect)
+    const localVal = localStorage.getItem(`yomo_is_public_${displayedWallet}`)
+    if (localVal !== null) {
+      setViewedWalletIsPublic(localVal === 'true')
+      return
+    }
+    fetch(`/api/wallet-prefs?address=${encodeURIComponent(displayedWallet)}`)
+      .then((r) => r.json())
+      .then((d) => setViewedWalletIsPublic(d?.isPublic !== false))
+      .catch(() => setViewedWalletIsPublic(true))
+  }, [displayedWallet, isViewingOwnWallet])
+
+  const handleTogglePublic = useCallback(() => {
+    const next = !isPublic
+    setIsPublic(next)
+    if (displayedWallet) {
+      localStorage.setItem(`yomo_is_public_${displayedWallet}`, String(next))
+      fetch('/api/wallet-prefs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: displayedWallet, isPublic: next }),
+      }).catch(() => {})
+    }
+  }, [isPublic, displayedWallet])
+
+  const showPrivateOverlay = !isViewingOwnWallet && !viewedWalletIsPublic
+  // Chat/notes only for claimed owner actively connected via Phantom
+  const isOwner = isViewingOwnWallet && isClaimed
+
   return (
     <div className={`min-h-screen ${backgroundStyle} text-accent relative overflow-hidden transition-colors duration-300`}>
 
@@ -758,20 +844,102 @@ function App() {
             theme={theme}
           />
         ) : (
-          /* Panel + Yomo + ChatPanel — centered to match footer (left-1/2 -translate-x-1/2) */
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+          /* Main app: search bar at top, panel row centered below */
+          <div className="absolute inset-0 flex flex-col">
+            {/* Wallet search — top center, subtle, owner only */}
+            {isClaimed && (
+              <div className="flex justify-center pt-6 pb-2 flex-shrink-0">
+                <form
+                  onSubmit={(e) => { e.preventDefault(); handleWalletSearch() }}
+                  className="flex flex-col items-center gap-1"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={walletSearchInput}
+                      onChange={(e) => { setWalletSearchInput(e.target.value); setWalletSearchError('') }}
+                      placeholder="Search wallet…"
+                      className={`w-44 font-mono text-xs px-3 py-1.5 rounded-lg border outline-none transition-colors ${
+                        theme === 'day'
+                          ? 'border-gray-300/80 bg-white/70 text-gray-700 placeholder-gray-400 focus:border-gray-400'
+                          : 'border-white/15 bg-white/5 text-white placeholder-white/40 focus:border-white/30'
+                      }`}
+                    />
+                    <button
+                      type="submit"
+                      className={`p-1.5 rounded-lg opacity-60 hover:opacity-90 transition-opacity ${
+                        theme === 'day' ? 'text-gray-500' : 'text-white/60'
+                      }`}
+                      aria-label="Search wallet"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                      </svg>
+                    </button>
+                  </div>
+                  {walletSearchError && (
+                    <span className={`font-mono text-[10px] ${theme === 'day' ? 'text-red-600' : 'text-red-400'}`}>
+                      {walletSearchError}
+                    </span>
+                  )}
+                </form>
+              </div>
+            )}
+            {/* Panel row — WalletInfoPanel, Yomo, ChatPanel — nudge left for visual balance */}
+            <div className="flex-1 flex items-center justify-center min-h-0">
             <div
               className="flex items-center gap-8"
-              style={{ transform: `scale(${scale}) translateX(-40px)`, transformOrigin: 'center center' }}
+              style={{ transform: `scale(${scale}) translateX(-65px)`, transformOrigin: 'center center' }}
             >
-            {/* Left: wallet info panel */}
-            <WalletInfoPanel
-              theme={theme}
-              transactions={walletTransactions}
-            />
+            {/* Left: wallet info panel or locked message when viewing private Yomo */}
+            {showPrivateOverlay ? (
+              <div
+                className={`flex flex-col items-center justify-center w-48 min-h-[200px] rounded-xl font-mono text-sm ${
+                  theme === 'day' ? 'bg-black/6 text-gray-500' : 'bg-white/8 text-white/50'
+                }`}
+              >
+                <svg className="w-8 h-8 mb-2 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                <span>this yomo is private</span>
+              </div>
+            ) : (
+              <WalletInfoPanel
+                theme={theme}
+                transactions={walletTransactions}
+              />
+            )}
 
             {/* Centre: Yomo + wallet label + session tracker */}
             <div className="flex flex-col items-center">
+
+              {/* Public/private toggle — above name label, connected owner only */}
+              {isClaimed && displayedWallet && isViewingOwnWallet && (
+                <div className="mb-2">
+                  <button
+                    type="button"
+                    onClick={handleTogglePublic}
+                    title={isPublic ? 'Public' : 'Private'}
+                    className={`p-1.5 rounded-full transition-opacity hover:opacity-80 ${
+                      isPublic
+                        ? theme === 'day'
+                          ? 'text-green-600'
+                          : 'text-green-400'
+                        : theme === 'day'
+                          ? 'text-gray-500'
+                          : 'text-white/50'
+                    }`}
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      {isPublic ? (
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z" />
+                      ) : (
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                      )}
+                    </svg>
+                  </button>
+                </div>
+              )}
 
               {/* Name / address label + claim badge inline above Yomo */}
               {displayedWallet && (
@@ -864,35 +1032,38 @@ function App() {
               </div>
 
               {/* Session tracker below Yomo */}
-              <div className="mt-4 flex items-center gap-2">
+              <div className="mt-4 flex flex-col items-center gap-1">
+                <div className="flex items-center gap-2">
                 {showStats && (
-                  <div
-                    className={`px-3 py-1.5 rounded-full font-mono text-xs transition-colors duration-300 ${
-                      theme === 'day' ? 'bg-black/8 text-gray-600' : 'bg-white/10 text-white/60'
-                    }`}
-                  >
-                    {sessionDisplay.active ? (
-                      <span>
-                        <span className={theme === 'day' ? 'text-gray-400' : 'text-white/40'}>Session: </span>
-                        <span>{formatElapsed(sessionDisplay.elapsed)}</span>
-                        <span className={theme === 'day' ? 'text-gray-400' : 'text-white/40'}> · </span>
-                        <span
-                          className={
-                            sessionDisplay.pnl > 0
-                              ? 'text-green-500'
-                              : sessionDisplay.pnl < 0
-                              ? 'text-red-400'
-                              : theme === 'day' ? 'text-gray-500' : 'text-white/50'
-                          }
-                        >
-                          {formatSessionPnl(sessionDisplay.pnl)}
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`px-3 py-1.5 rounded-full font-mono text-xs transition-colors duration-300 ${
+                        theme === 'day' ? 'bg-black/8 text-gray-600' : 'bg-white/10 text-white/60'
+                      }`}
+                    >
+                      {sessionDisplay.active ? (
+                        <span>
+                          <span className={theme === 'day' ? 'text-gray-400' : 'text-white/40'}>Session: </span>
+                          <span>{formatElapsed(sessionDisplay.elapsed)}</span>
+                          <span className={theme === 'day' ? 'text-gray-400' : 'text-white/40'}> · </span>
+                          <span
+                            className={
+                              sessionDisplay.pnl > 0
+                                ? 'text-green-500'
+                                : sessionDisplay.pnl < 0
+                                ? 'text-red-400'
+                                : theme === 'day' ? 'text-gray-500' : 'text-white/50'
+                            }
+                          >
+                            {formatSessionPnl(sessionDisplay.pnl)}
+                          </span>
                         </span>
-                      </span>
-                    ) : (
-                      <span className={theme === 'day' ? 'text-gray-400' : 'text-white/35'}>
-                        No active session
-                      </span>
-                    )}
+                      ) : (
+                        <span className={theme === 'day' ? 'text-gray-400' : 'text-white/35'}>
+                          No active session
+                        </span>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -916,26 +1087,42 @@ function App() {
                     </svg>
                   )}
                 </button>
+                </div>
+                {isViewingOwnWallet && streak > 0 && (
+                  <span
+                    className={`font-mono text-[10px] ${theme === 'day' ? 'text-amber-600' : 'text-amber-400/90'}`}
+                    title="Daily check-in streak"
+                  >
+                    {streak} 🔥
+                  </span>
+                )}
               </div>
 
             </div>
 
-            {/* Right: chat panel (all viewers; Notes tab only for own wallet) */}
+            {/* Right: chat panel — only for claimed owner viewing own wallet */}
             <ChatPanel
               theme={theme}
-              isOwner={isViewingOwnWallet}
+              isOwner={isOwner}
               emotion={emotion}
               sessionPnl={sessionDisplay.pnl}
               sessionDuration={sessionDisplay.elapsed}
               recentTrades={walletTransactions.slice(0, 5)}
               walletAddress={displayedWallet}
               yomoName={yomoDisplayName}
+              streak={streak}
               addMessageRef={addYomoToChatRef}
             />
+            </div>
             </div>
           </div>
         )}
       </div>
+
+      {/* Daily check-in modal */}
+      {showMainApp && showCheckIn && isOwner && (
+        <CheckInModal theme={theme} onComplete={handleCheckInComplete} yomoName={yomoDisplayName} />
+      )}
 
       {/* Footer */}
       <a
